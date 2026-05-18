@@ -1,17 +1,6 @@
-"""
-Bot de Telegram — Transcripción y Resumen de Audios (versión Groq, GRATUITA)
-=============================================================================
-Dependencias:
-    pip install python-telegram-bot groq
-
-Variables de entorno necesarias:
-    TELEGRAM_TOKEN  — Token del bot (BotFather)
-    GROQ_API_KEY    — Clave de Groq (gratuita en console.groq.com)
-
-Modelos usados (ambos gratuitos en Groq):
-    Transcripción : whisper-large-v3
-    Resumen       : llama-3.3-70b-versatile
-"""
+# Bot Telegram: Transcripción de audios (Groq)
+# Dependencias: pip install python-telegram-bot groq
+# Variables de entorno: TELEGRAM_TOKEN, GROQ_API_KEY
 
 import os
 import logging
@@ -24,27 +13,19 @@ try:
 except ImportError:
     pass
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
 from telegram.error import TelegramError
 from groq import Groq, APIError, RateLimitError, APITimeoutError
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    level=logging.INFO,
-)
+logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# ── Configuración ─────────────────────────────────────────────────────────────
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
@@ -52,42 +33,18 @@ GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
 TRANSCRIPTION_MODEL = "whisper-large-v3"
 SUMMARY_MODEL       = "llama-3.3-70b-versatile"
 
-# El resumen solo se genera si el audio supera este umbral (en segundos)
 SUMMARY_MIN_SECONDS = 40
-
-# Groq limita el tamaño de audio a 25 MB
 MAX_FILE_SIZE_MB = 25
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
-# Modos de respuesta
-MODE_TRANSCRIBE = "transcribir"
-MODE_BOTH       = "resumir"
-
-# ── Cliente Groq ──────────────────────────────────────────────────────────────
-
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
-def get_mode(context: ContextTypes.DEFAULT_TYPE) -> str:
-    return context.user_data.get("mode", MODE_BOTH)
-
-
-def mode_keyboard(current_mode: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton(
-            "Solo transcripción" + (" ✓" if current_mode == MODE_TRANSCRIBE else ""),
-            callback_data=MODE_TRANSCRIBE,
-        ),
-        InlineKeyboardButton(
-            "Resumen" + (" ✓" if current_mode == MODE_BOTH else ""),
-            callback_data=MODE_BOTH,
-        ),
-    ]])
-
+def format_duration(seconds: int) -> str:
+    if seconds >= 60:
+        return f"{seconds // 60} min {seconds % 60} s"
+    return f"{seconds} s"
 
 def transcribe(file_path: str) -> str:
-    """Transcribe audio con Whisper en Groq (idioma forzado a español)."""
     with open(file_path, "rb") as f:
         result = groq_client.audio.transcriptions.create(
             model=TRANSCRIPTION_MODEL,
@@ -95,107 +52,64 @@ def transcribe(file_path: str) -> str:
             language="es",
             response_format="text",
         )
-    # Groq devuelve el texto directamente cuando response_format="text"
     return (result or "").strip()
 
-
 def summarize(text: str) -> str:
-    """Genera un resumen en español con Llama via Groq."""
     response = groq_client.chat.completions.create(
         model=SUMMARY_MODEL,
         max_tokens=500,
-        temperature=0.3,   # Menos creatividad → más fiel al original
+        temperature=0.3,
         messages=[
             {
                 "role": "system",
                 "content": (
                     "Eres un asistente que resume textos en español de forma clara y concisa. "
                     "Responde SOLO con el resumen, sin saludos ni explicaciones adicionales. "
-                    "Usa viñetas (•) si hay varios puntos clave."
+                    "Usa viñetas si hay varios puntos clave."
                 ),
             },
-            {
-                "role": "user",
-                "content": f"Resume este texto:\n\n{text}",
-            },
+            {"role": "user", "content": f"Resume este texto:\n\n{text}"},
         ],
     )
     return response.choices[0].message.content.strip()
 
-
-def format_duration(seconds: int) -> str:
-    """Formatea segundos como '1 min 23 s' o '45 s'."""
-    if seconds >= 60:
-        return f"{seconds // 60} min {seconds % 60} s"
-    return f"{seconds} s"
-
-
-# ── Handlers de comandos ──────────────────────────────────────────────────────
+# Comandos
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    mode = get_mode(context)
+    # Por defecto los resúmenes están activados
+    context.user_data.setdefault("summary_enabled", True)
     await update.message.reply_text(
-        "¡Hola! Soy tu asistente de transcripción de audios.\n\n"
-        "Envíame una *nota de voz* o *archivo de audio* y te lo transcribo al instante.\n"
-        "Si dura más de 40 segundos, también puedo hacerte un resumen.\n\n"
-        "Todo funciona de forma *gratuita* gracias a Groq. 🚀",
-        parse_mode="Markdown",
-        reply_markup=mode_keyboard(mode),
+        "Bot de transcripción.\n\n"
+        "Envía una nota de voz o un archivo de audio y recibirás la transcripción.\n"
+        "Si el audio dura al menos 40 segundos y los resúmenes están activados, "
+        "se enviará un resumen en un mensaje separado.",
     )
-
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    mode = get_mode(context)
     await update.message.reply_text(
-        "*Comandos*\n\n"
+        "Comandos:\n"
         "/start — Inicio\n"
-        "/modo  — Cambiar modo\n"
+        "/modo  — Activar/desactivar resúmenes\n"
         "/ayuda — Esta ayuda\n\n"
-        "*Formatos aceptados:*\n"
-        "Notas de voz · MP3 · M4A · WAV · OGG · FLAC · MP4 (videomensaje)\n\n"
-        f"Tamaño máximo: {MAX_FILE_SIZE_MB} MB",
-        parse_mode="Markdown",
-        reply_markup=mode_keyboard(mode),
+        "Formatos aceptados: notas de voz, MP3, M4A, WAV, OGG, FLAC, MP4 (videomensaje)\n"
+        f"Tamaño máximo: {MAX_FILE_SIZE_MB} MB"
     )
-
 
 async def cmd_modo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    mode = get_mode(context)
-    await update.message.reply_text(
-        "Selecciona el modo de respuesta:",
-        reply_markup=mode_keyboard(mode),
-    )
+    current = context.user_data.get("summary_enabled", True)
+    context.user_data["summary_enabled"] = not current
+    state = "activados" if context.user_data["summary_enabled"] else "desactivados"
+    await update.message.reply_text(f"Resúmenes {state}.")
 
-
-# ── Handler de botones inline ─────────────────────────────────────────────────
-
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-
-    new_mode = query.data
-    context.user_data["mode"] = new_mode
-
-    label = "Solo transcripción" if new_mode == MODE_TRANSCRIBE else "Transcripción + resumen"
-    await query.edit_message_text(
-        f"Modo actualizado: *{label}*\n\n"
-        "Listo, envíame un audio cuando quieras.",
-        parse_mode="Markdown",
-        reply_markup=mode_keyboard(new_mode),
-    )
-
-
-# ── Handler principal de audio ────────────────────────────────────────────────
+# Manejo de audio
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
-    mode    = get_mode(context)
-
-    # ── 1. Identificar tipo de audio y metadatos ──────────────────────────────
+    # Identificar tipo de audio
     if message.voice:
         tg_file  = await context.bot.get_file(message.voice.file_id)
         ext      = "ogg"
-        duration = message.voice.duration
+        duration = message.voice.duration or 0
         size     = message.voice.file_size or 0
     elif message.audio:
         tg_file  = await context.bot.get_file(message.audio.file_id)
@@ -206,138 +120,94 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     elif message.video_note:
         tg_file  = await context.bot.get_file(message.video_note.file_id)
         ext      = "mp4"
-        duration = message.video_note.duration
+        duration = message.video_note.duration or 0
         size     = message.video_note.file_size or 0
     else:
         return
 
-    # ── 2. Validar tamaño antes de descargar ──────────────────────────────────
     if size > MAX_FILE_SIZE_BYTES:
-        await message.reply_text(
-            f"El archivo pesa más de {MAX_FILE_SIZE_MB} MB, que es el límite de Groq.\n"
-            "Por favor envía un audio más corto."
-        )
+        await message.reply_text(f"El archivo supera {MAX_FILE_SIZE_MB} MB. Envía un audio más corto.")
         return
 
-    status_msg = await message.reply_text("Descargando audio…")
+    status_msg = await message.reply_text("Procesando audio...")
     tmp_path = None
 
     try:
-        # ── 3. Descargar a fichero temporal ───────────────────────────────────
         with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
             tmp_path = tmp.name
         await tg_file.download_to_drive(tmp_path)
 
-        # ── 4. Transcribir ────────────────────────────────────────────────────
-        await status_msg.edit_text("Transcribiendo…")
+        await status_msg.edit_text("Transcribiendo...")
         transcription = transcribe(tmp_path)
 
         if not transcription:
             await status_msg.edit_text(
-                "No detecté voz en el audio. "
-                "Comprueba que el volumen sea suficiente o que no esté en silencio."
+                "No se detectó voz en el audio. Comprueba el volumen o prueba otro archivo."
             )
             return
 
-        # ── 5. Decidir si resumir ─────────────────────────────────────────────
-        needs_summary = (mode == MODE_BOTH) and (duration >= SUMMARY_MIN_SECONDS)
-
-        parts = [f"*Transcripción:*\n\n{transcription}"]
-
-        if needs_summary:
-            await status_msg.edit_text("📌 Generando resumen…")
-            summary = summarize(transcription)
-            parts.append(f"*Resumen:*\n\n{summary}")
-        elif mode == MODE_BOTH and duration < SUMMARY_MIN_SECONDS:
-            parts.append(
-                f"_ℹEl audio dura {format_duration(duration)}, "
-                f"se necesitan al menos {SUMMARY_MIN_SECONDS} s para generar resumen._"
-            )
-
-        # ── 6. Enviar respuesta ───────────────────────────────────────────────
+        # Enviar transcripción
         await status_msg.delete()
-        await message.reply_text(
-            "\n\n".join(parts),
-            parse_mode="Markdown",
-            reply_markup=mode_keyboard(mode),
-        )
+        await message.reply_text(f"Transcripción:\n\n{transcription}")
 
-    # ── Gestión de errores específicos de Groq ─────────────────────────────────
+        # Generar resumen en mensaje separado si procede
+        summary_enabled = context.user_data.get("summary_enabled", True)
+        if summary_enabled and duration >= SUMMARY_MIN_SECONDS:
+            # Enviar un mensaje independiente con el resumen
+            try:
+                await message.reply_text("Generando resumen...")
+                summary = summarize(transcription)
+                await message.reply_text(f"Resumen:\n\n{summary}")
+            except RateLimitError:
+                logger.warning("Límite alcanzado al generar resumen")
+                await message.reply_text("No se pudo generar el resumen en este momento. Intenta más tarde.")
+            except APITimeoutError:
+                logger.warning("Timeout al generar resumen")
+                await message.reply_text("La generación del resumen tardó demasiado. Intenta con un audio más corto.")
+            except APIError:
+                logger.error("Error en la API al generar resumen")
+                await message.reply_text("Error al generar el resumen. Intenta de nuevo más tarde.")
+
     except RateLimitError:
-        logger.warning("Groq rate limit alcanzado")
-        await status_msg.edit_text(
-            "⏱Se ha alcanzado el límite de uso de Groq por ahora.\n"
-            "Espera unos segundos y vuelve a intentarlo."
-        )
+        logger.warning("Límite alcanzado en transcripción")
+        await status_msg.edit_text("No se puede procesar ahora. Intenta de nuevo en unos segundos.")
     except APITimeoutError:
-        logger.warning("Groq API timeout")
-        await status_msg.edit_text(
-            "La transcripción tardó demasiado. El audio puede ser muy largo.\n"
-            "Prueba con un fragmento más corto."
-        )
+        logger.warning("Timeout en transcripción")
+        await status_msg.edit_text("La transcripción tardó demasiado. Prueba con un fragmento más corto.")
     except APIError as e:
-        logger.error("Groq API error: %s", e)
-        await status_msg.edit_text(
-            "Error en el servicio de transcripción. Inténtalo de nuevo en unos segundos."
-        )
+        logger.error("Error en la API de transcripción: %s", e)
+        await status_msg.edit_text("Error en el servicio de transcripción. Intenta de nuevo más tarde.")
     except TelegramError as e:
-        logger.error("Telegram error: %s", e)
-        # Si falla al editar el mensaje de estado, no hacer nada más
+        logger.error("Error de Telegram: %s", e)
     except Exception as e:
-        logger.exception("Error inesperado procesando audio: %s", e)
+        logger.exception("Error inesperado: %s", e)
         try:
-            await status_msg.edit_text(
-                "Ocurrió un error inesperado. Por favor inténtalo más tarde."
-            )
+            await status_msg.edit_text("Ocurrió un error inesperado. Intenta más tarde.")
         except TelegramError:
             pass
     finally:
-        # Siempre limpiar el fichero temporal
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
-
-# ── Fallback para mensajes de texto ──────────────────────────────────────────
-
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    mode = get_mode(context)
-    await update.message.reply_text(
-        "Envíame una *nota de voz* o *archivo de audio* para transcribirlo.\n"
-        "Usa /ayuda si necesitas más información.",
-        parse_mode="Markdown",
-        reply_markup=mode_keyboard(mode),
-    )
-
-
-# ── Punto de entrada ──────────────────────────────────────────────────────────
+    await update.message.reply_text("Envía una nota de voz o un archivo de audio para transcribirlo. Usa /ayuda para más información.")
 
 def main() -> None:
-    # Validar variables de entorno al arrancar
     missing = [v for v in ("TELEGRAM_TOKEN", "GROQ_API_KEY") if not os.environ.get(v)]
     if missing:
-        raise EnvironmentError(
-            f"Faltan las siguientes variables de entorno: {', '.join(missing)}\n"
-            "Consigue tu clave gratuita de Groq en https://console.groq.com"
-        )
+        raise EnvironmentError(f"Faltan las variables de entorno: {', '.join(missing)}")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    app.add_handler(CommandHandler("start",  cmd_start))
-    app.add_handler(CommandHandler("ayuda",  cmd_help))
-    app.add_handler(CommandHandler("help",   cmd_help))
-    app.add_handler(CommandHandler("modo",   cmd_modo))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(
-        MessageHandler(
-            filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE,
-            handle_audio,
-        )
-    )
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("ayuda", cmd_help))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("modo", cmd_modo))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE, handle_audio))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    logger.info("Bot arrancado. Esperando mensajes…")
+    logger.info("Bot iniciado. Esperando mensajes...")
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     import asyncio
