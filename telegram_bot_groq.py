@@ -1,7 +1,3 @@
-# Bot Telegram: Transcripción de audios (Groq)
-# Dependencias: pip install python-telegram-bot groq
-# Variables de entorno: TELEGRAM_TOKEN, GROQ_API_KEY
-
 import os
 import logging
 import tempfile
@@ -22,7 +18,7 @@ from telegram.ext import (
     filters,
 )
 from telegram.error import TelegramError
-from groq import Groq, APIError, RateLimitError, APITimeoutError
+from groq import AsyncGroq, APIError, RateLimitError, APITimeoutError
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -34,19 +30,19 @@ TRANSCRIPTION_MODEL = "whisper-large-v3"
 SUMMARY_MODEL       = "llama-3.3-70b-versatile"
 
 SUMMARY_MIN_SECONDS = 40
-MAX_FILE_SIZE_MB = 25
+MAX_FILE_SIZE_MB = 20 
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
 def format_duration(seconds: int) -> str:
     if seconds >= 60:
         return f"{seconds // 60} min {seconds % 60} s"
     return f"{seconds} s"
 
-def transcribe(file_path: str) -> str:
+async def transcribe(file_path: str) -> str:
     with open(file_path, "rb") as f:
-        result = groq_client.audio.transcriptions.create(
+        result = await groq_client.audio.transcriptions.create(
             model=TRANSCRIPTION_MODEL,
             file=f,
             language="es",
@@ -54,8 +50,8 @@ def transcribe(file_path: str) -> str:
         )
     return (result or "").strip()
 
-def summarize(text: str) -> str:
-    response = groq_client.chat.completions.create(
+async def summarize(text: str) -> str:
+    response = await groq_client.chat.completions.create(
         model=SUMMARY_MODEL,
         max_tokens=500,
         temperature=0.3,
@@ -76,13 +72,12 @@ def summarize(text: str) -> str:
 # Comandos
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Por defecto los resúmenes están activados
     context.user_data.setdefault("summary_enabled", True)
     await update.message.reply_text(
         "Bot de transcripción.\n\n"
         "Envía una nota de voz o un archivo de audio y recibirás la transcripción.\n"
         "Si el audio dura al menos 40 segundos y los resúmenes están activados, "
-        "se enviará un resumen en un mensaje separado.",
+        "se enviará un resumen en un mensaje separado."
     )
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -105,7 +100,7 @@ async def cmd_modo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
-    # Identificar tipo de audio
+    
     if message.voice:
         tg_file  = await context.bot.get_file(message.voice.file_id)
         ext      = "ogg"
@@ -133,31 +128,28 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     tmp_path = None
 
     try:
+        await status_msg.edit_text("Descargando audio...")
         with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
             tmp_path = tmp.name
-        await tg_file.download_to_drive(tmp_path)
+        
+        await tg_file.download_to_drive(tmp_path, read_timeout=60)
 
         await status_msg.edit_text("Transcribiendo...")
-        transcription = transcribe(tmp_path)
+        transcription = await transcribe(tmp_path)
 
         if not transcription:
-            await status_msg.edit_text(
-                "No se detectó voz en el audio. Comprueba el volumen o prueba otro archivo."
-            )
+            await status_msg.edit_text("No se detectó voz en el audio. Comprueba el volumen o prueba otro archivo.")
             return
 
-        # Enviar transcripción
         await status_msg.delete()
         await message.reply_text(f"Transcripción:\n\n{transcription}")
 
-        # Generar resumen en mensaje separado si procede
         summary_enabled = context.user_data.get("summary_enabled", True)
         if summary_enabled and duration >= SUMMARY_MIN_SECONDS:
-            # Enviar un mensaje independiente con el resumen
             try:
-                await message.reply_text("Generando resumen...")
-                summary = summarize(transcription)
-                await message.reply_text(f"Resumen:\n\n{summary}")
+                summary_msg = await message.reply_text("Generando resumen...")
+                summary = await summarize(transcription)
+                await summary_msg.edit_text(f"Resumen:\n\n{summary}")
             except RateLimitError:
                 logger.warning("Límite alcanzado al generar resumen")
                 await message.reply_text("No se pudo generar el resumen en este momento. Intenta más tarde.")
@@ -179,6 +171,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await status_msg.edit_text("Error en el servicio de transcripción. Intenta de nuevo más tarde.")
     except TelegramError as e:
         logger.error("Error de Telegram: %s", e)
+        await status_msg.edit_text("Ocurrió un error al descargar el archivo de audio.")
     except Exception as e:
         logger.exception("Error inesperado: %s", e)
         try:
@@ -197,7 +190,7 @@ def main() -> None:
     if missing:
         raise EnvironmentError(f"Faltan las variables de entorno: {', '.join(missing)}")
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).read_timeout(60).write_timeout(60).connect_timeout(60).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("ayuda", cmd_help))
@@ -210,6 +203,4 @@ def main() -> None:
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.set_event_loop(asyncio.new_event_loop())
     main()
