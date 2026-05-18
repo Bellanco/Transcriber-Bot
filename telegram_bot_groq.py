@@ -22,7 +22,7 @@ from telegram.ext import (
     filters,
     PicklePersistence,
 )
-from telegram.error import TelegramError, BadRequest
+from telegram.error import TelegramError, BadRequest, Conflict
 from groq import AsyncGroq, APIError, RateLimitError, APITimeoutError
 
 logging.basicConfig(
@@ -122,7 +122,8 @@ def split_text(text: str, limit: int = MAX_TELEGRAM_LENGTH) -> List[str]:
 async def stream_text(message: Message, text: str) -> Optional[Message]:
     paragraphs = [p for p in text.split("\n\n") if p.strip()]
     if not paragraphs:
-        return await message.reply_text(text)
+        fallback = text.strip() if text.strip() else "No se pudo estructurar el texto."
+        return await message.reply_text(fallback)
 
     sent = await message.reply_text(paragraphs[0])
     accumulated = paragraphs[0]
@@ -148,7 +149,7 @@ async def send_long_text(message: Message, text: str) -> Optional[Message]:
     return first
 
 async def safe_edit(msg: Optional[Message], text: str):
-    if not msg:
+    if not msg or not text.strip():
         return
     try:
         await msg.edit_text(text)
@@ -164,7 +165,12 @@ async def safe_delete(msg: Optional[Message]):
         pass
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.exception("Error no controlado", exc_info=context.error)
+    if isinstance(context.error, Conflict):
+        logger.warning("Conflicto de polling mitigado: Otra instancia activa respondiendo.")
+    elif isinstance(context.error, TelegramError):
+        logger.error(f"Inconsistencia en Telegram API: {context.error}")
+    else:
+        logger.exception("Error no controlado", exc_info=context.error)
 
 async def transcribe(file_path: str) -> tuple[str, str]:
     with open(file_path, "rb") as f:
@@ -187,6 +193,10 @@ async def transcribe(file_path: str) -> tuple[str, str]:
         plain = getattr(result, "text", "").strip()
 
     formatted = paragraphs_from_segments(segments) if segments else plain
+    
+    if not formatted.strip():
+        formatted = plain
+        
     return plain, formatted
 
 async def summarize(text: str) -> str:
@@ -292,17 +302,24 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             raw_transcription, formatted = await transcribe(tmp_path)
 
-            if not raw_transcription:
+            if not raw_transcription.strip():
                 await safe_edit(status_msg, "No se detectó voz en el audio.")
                 return
 
             await safe_delete(status_msg)
             transcription_msg = await stream_text(message, formatted)
 
+            if not transcription_msg:
+                transcription_msg = message
+
             summary_enabled = context.user_data.get("summary_enabled", True)
             if summary_enabled and duration >= SUMMARY_MIN_SECONDS:
                 summary_status = await transcription_msg.reply_text("Preparando resumen...")
                 summary = await summarize(raw_transcription[:MAX_SUMMARY_INPUT])
+                
+                if not summary.strip():
+                    summary = "No se pudo generar un resumen del contenido."
+                    
                 await safe_edit(summary_status, summary)
 
     except RateLimitError:
