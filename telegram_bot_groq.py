@@ -2,6 +2,7 @@ import os
 import logging
 import tempfile
 import asyncio
+import re
 from pathlib import Path
 from typing import Optional, List
 
@@ -11,15 +12,17 @@ try:
 except ImportError:
     pass
 
-from telegram import Update, Message
+from telegram import Update, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
+    PicklePersistence,
 )
-from telegram.error import TelegramError, BadRequest
+from telegram.error import TelegramError, BadRequest, Conflict
 from groq import AsyncGroq, APIError, RateLimitError, APITimeoutError
 
 logging.basicConfig(
@@ -29,66 +32,55 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
-TRANSCRIPTION_MODEL   = "whisper-large-v3"
-SUMMARY_MODEL         = "llama-3.3-70b-versatile"
+TRANSCRIPTION_MODEL = "whisper-large-v3"
+SUMMARY_MODEL = "llama-3.3-70b-versatile"
 
-SUMMARY_MIN_SECONDS   = 40
-MAX_FILE_SIZE_MB      = 20
-MAX_FILE_SIZE_BYTES   = MAX_FILE_SIZE_MB * 1024 * 1024
-MAX_TELEGRAM_LENGTH   = 4096
-MAX_SUMMARY_INPUT     = 12000
+SUMMARY_MIN_SECONDS = 40
+MAX_FILE_SIZE_MB = 20
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+MAX_TELEGRAM_LENGTH = 4040
+MAX_SUMMARY_INPUT = 12000
 PROCESSING_CONCURRENCY = 2
-
-# Pausa mínima entre segmentos de Whisper para crear nuevo párrafo (segundos)
 PAUSE_THRESHOLD = 0.92
+STREAM_DELAY = 1.5
+MAX_PARAGRAPH_LENGTH = 800
 
-# Retardo entre bloques al revelar el texto (segundos)
-STREAM_DELAY = 0.6
-
-groq_client          = AsyncGroq(api_key=GROQ_API_KEY)
+groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 processing_semaphore = asyncio.Semaphore(PROCESSING_CONCURRENCY)
 
-
-# ── Formateo de texto ─────────────────────────────────────────────────────────
-
 def paragraphs_from_segments(segments: list) -> str:
-    """
-    Recibe los segmentos de Whisper (cada uno con 'start', 'end', 'text')
-    y los agrupa en párrafos según las pausas entre ellos.
-    Si la pausa entre el final de un segmento y el inicio del siguiente
-    supera PAUSE_THRESHOLD, se abre un párrafo nuevo.
-    """
     if not segments:
         return ""
 
     paragraphs = []
-    current: List[str] = []
+    current = []
+    current_len = 0
 
     for i, seg in enumerate(segments):
-        text = seg.get("text", "").strip()
+        text = getattr(seg, "text", "").strip()
         if not text:
             continue
 
         current.append(text)
+        current_len += len(text)
 
-        # Comprobar pausa con el segmento siguiente
+        force_break = current_len > MAX_PARAGRAPH_LENGTH and text[-1] in ".!?"
+
         if i < len(segments) - 1:
-            gap = segments[i + 1].get("start", 0) - seg.get("end", 0)
-            if gap >= PAUSE_THRESHOLD:
+            gap = getattr(segments[i + 1], "start", 0) - getattr(seg, "end", 0)
+            if gap >= PAUSE_THRESHOLD or force_break:
                 paragraphs.append(" ".join(current))
                 current = []
+                current_len = 0
 
     if current:
         paragraphs.append(" ".join(current))
 
     return "\n\n".join(paragraphs)
 
-
 def format_summary(text: str) -> str:
-    """Normaliza las viñetas del resumen y añade espaciado entre puntos."""
-    import re
     lines = text.splitlines()
     formatted = []
 
@@ -97,18 +89,14 @@ def format_summary(text: str) -> str:
         if not line:
             formatted.append("")
             continue
-        # Normalizar distintos tipos de viñeta a •
         line = re.sub(r'^[\*\-]\s+', '• ', line)
         formatted.append(line)
 
     result = "\n".join(formatted)
-    # Asegurar línea en blanco antes de cada viñeta
     result = re.sub(r'\n(•)', r'\n\n\1', result)
     return result.strip()
 
-
 def split_text(text: str, limit: int = MAX_TELEGRAM_LENGTH) -> List[str]:
-    """Divide texto largo respetando párrafos."""
     text = text.strip()
     if not text:
         return [""]
@@ -131,39 +119,27 @@ def split_text(text: str, limit: int = MAX_TELEGRAM_LENGTH) -> List[str]:
     parts.append(remaining)
     return [p for p in parts if p]
 
-
-# ── Envío progresivo ──────────────────────────────────────────────────────────
-
 async def stream_text(message: Message, text: str) -> Optional[Message]:
-    """
-    Simula streaming revelando el texto párrafo a párrafo.
-    Edita el mismo mensaje en cada paso para dar sensación de escritura progresiva.
-    Devuelve el mensaje enviado.
-    """
     paragraphs = [p for p in text.split("\n\n") if p.strip()]
     if not paragraphs:
-        return await message.reply_text(text)
+        fallback = text.strip() if text.strip() else "No se pudo estructurar el texto."
+        return await message.reply_text(fallback)
 
-    # Enviar el primer párrafo
     sent = await message.reply_text(paragraphs[0])
-
-    # Ir añadiendo párrafos con un pequeño retardo
     accumulated = paragraphs[0]
+    
     for paragraph in paragraphs[1:]:
         await asyncio.sleep(STREAM_DELAY)
         accumulated += f"\n\n{paragraph}"
         try:
             await sent.edit_text(accumulated)
         except (BadRequest, TelegramError):
-            # Si el mensaje supera el límite, enviar uno nuevo
             sent = await message.reply_text(paragraph)
             accumulated = paragraph
 
     return sent
 
-
 async def send_long_text(message: Message, text: str) -> Optional[Message]:
-    """Envía texto largo dividido en mensajes y devuelve el primero."""
     chunks = split_text(text)
     first = None
     for chunk in chunks:
@@ -172,17 +148,13 @@ async def send_long_text(message: Message, text: str) -> Optional[Message]:
             first = sent
     return first
 
-
-# ── Helpers Telegram ──────────────────────────────────────────────────────────
-
 async def safe_edit(msg: Optional[Message], text: str):
-    if not msg:
+    if not msg or not text.strip():
         return
     try:
         await msg.edit_text(text)
     except (BadRequest, TelegramError):
         pass
-
 
 async def safe_delete(msg: Optional[Message]):
     if not msg:
@@ -192,46 +164,40 @@ async def safe_delete(msg: Optional[Message]):
     except TelegramError:
         pass
 
-
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.exception("Error no controlado", exc_info=context.error)
-
-
-# ── Groq ──────────────────────────────────────────────────────────────────────
+    if isinstance(context.error, Conflict):
+        logger.warning("Conflicto de polling mitigado: Otra instancia activa respondiendo.")
+    elif isinstance(context.error, TelegramError):
+        logger.error(f"Inconsistencia en Telegram API: {context.error}")
+    else:
+        logger.exception("Error no controlado", exc_info=context.error)
 
 async def transcribe(file_path: str) -> tuple[str, str]:
-    """
-    Transcribe el audio con Whisper en modo verbose_json para obtener
-    los segmentos con timestamps y detectar pausas reales.
-
-    Devuelve una tupla (texto_plano, texto_formateado_con_párrafos).
-    """
     with open(file_path, "rb") as f:
         result = await groq_client.audio.transcriptions.create(
             model=TRANSCRIPTION_MODEL,
             file=f,
-            language="es",
             response_format="verbose_json",
+            prompt="Transcripción clara y legible. Preserva correctamente eñes, tildes y signos de puntuación.",
         )
 
     segments = getattr(result, "segments", None) or []
 
-    # Texto plano (para el resumen)
     plain = " ".join(
-        seg.get("text", "").strip()
+        getattr(seg, "text", "").strip()
         for seg in segments
-        if seg.get("text", "").strip()
+        if getattr(seg, "text", "").strip()
     ).strip()
 
-    # Si Groq no devuelve segmentos, usar el texto directo sin pausas
     if not plain:
         plain = getattr(result, "text", "").strip()
 
-    # Texto con párrafos basados en pausas reales
     formatted = paragraphs_from_segments(segments) if segments else plain
-
+    
+    if not formatted.strip():
+        formatted = plain
+        
     return plain, formatted
-
 
 async def summarize(text: str) -> str:
     response = await groq_client.chat.completions.create(
@@ -254,9 +220,6 @@ async def summarize(text: str) -> str:
     raw = response.choices[0].message.content.strip()
     return format_summary(raw)
 
-
-# ── Comandos ──────────────────────────────────────────────────────────────────
-
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.setdefault("summary_enabled", True)
     await update.message.reply_text(
@@ -266,26 +229,37 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Usa /modo para activar o desactivar los resúmenes."
     )
 
-
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Comandos disponibles:\n\n"
-        "/modo  — Activar o desactivar el resumen\n"
+        "/modo — Activar o desactivar el resumen\n"
         "/ayuda — Esta ayuda\n\n"
         "Formatos aceptados:\n"
         "Notas de voz, MP3, M4A, WAV, OGG, FLAC, MP4\n\n"
         f"Tamaño máximo: {MAX_FILE_SIZE_MB} MB"
     )
 
-
 async def cmd_modo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    enabled = context.user_data.get("summary_enabled", True)
+    state = "ACTIVADOS" if enabled else "DESACTIVADOS"
+    text = f"Configuración de resúmenes:\n\nEstado actual: *{state}*"
+    btn_text = "Desactivar Resúmenes" if enabled else "Activar Resúmenes"
+    keyboard = [[InlineKeyboardButton(btn_text, callback_data="toggle_summary")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+async def cb_modo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
     current = context.user_data.get("summary_enabled", True)
     context.user_data["summary_enabled"] = not current
-    state = "activados" if context.user_data["summary_enabled"] else "desactivados"
-    await update.message.reply_text(f"Resúmenes {state}.")
-
-
-# ── Handler de audio ──────────────────────────────────────────────────────────
+    enabled = context.user_data["summary_enabled"]
+    state = "ACTIVADOS" if enabled else "DESACTIVADOS"
+    text = f"Configuración de resúmenes:\n\nEstado actual: *{state}*"
+    btn_text = "Desactivar Resúmenes" if enabled else "Activar Resúmenes"
+    keyboard = [[InlineKeyboardButton(btn_text, callback_data="toggle_summary")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -293,21 +267,21 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if message.voice:
-        tg_file  = await context.bot.get_file(message.voice.file_id)
-        ext      = "ogg"
+        tg_file = await context.bot.get_file(message.voice.file_id)
+        ext = "ogg"
         duration = message.voice.duration or 0
-        size     = message.voice.file_size or 0
+        size = message.voice.file_size or 0
     elif message.audio:
-        tg_file  = await context.bot.get_file(message.audio.file_id)
+        tg_file = await context.bot.get_file(message.audio.file_id)
         filename = message.audio.file_name or ""
-        ext      = Path(filename).suffix.lstrip(".").lower() or "mp3"
+        ext = Path(filename).suffix.lstrip(".").lower() or "mp3"
         duration = message.audio.duration or 0
-        size     = message.audio.file_size or 0
+        size = message.audio.file_size or 0
     elif message.video_note:
-        tg_file  = await context.bot.get_file(message.video_note.file_id)
-        ext      = "mp4"
+        tg_file = await context.bot.get_file(message.video_note.file_id)
+        ext = "mp4"
         duration = message.video_note.duration or 0
-        size     = message.video_note.file_size or 0
+        size = message.video_note.file_size or 0
     else:
         return
 
@@ -316,31 +290,36 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     status_msg = await message.reply_text("Procesando tu audio...")
-    tmp_path   = None
+    tmp_path = None
 
     try:
         async with processing_semaphore:
-
             await safe_edit(status_msg, "Transcribiendo...")
-
+            
             with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp:
                 tmp_path = tmp.name
             await tg_file.download_to_drive(tmp_path)
 
             raw_transcription, formatted = await transcribe(tmp_path)
 
-            if not raw_transcription:
+            if not raw_transcription.strip():
                 await safe_edit(status_msg, "No se detectó voz en el audio.")
                 return
 
             await safe_delete(status_msg)
             transcription_msg = await stream_text(message, formatted)
 
-            # Resumen si procede
+            if not transcription_msg:
+                transcription_msg = message
+
             summary_enabled = context.user_data.get("summary_enabled", True)
             if summary_enabled and duration >= SUMMARY_MIN_SECONDS:
                 summary_status = await transcription_msg.reply_text("Preparando resumen...")
                 summary = await summarize(raw_transcription[:MAX_SUMMARY_INPUT])
+                
+                if not summary.strip():
+                    summary = "No se pudo generar un resumen del contenido."
+                    
                 await safe_edit(summary_status, summary)
 
     except RateLimitError:
@@ -358,23 +337,20 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
-
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Envía una nota de voz o archivo de audio para transcribirlo."
-    )
-
-
-# ── Arranque ──────────────────────────────────────────────────────────────────
+    await update.message.reply_text("Envía una nota de voz o archivo de audio para transcribirlo.")
 
 def main():
     missing = [v for v in ("TELEGRAM_TOKEN", "GROQ_API_KEY") if not os.environ.get(v)]
     if missing:
         raise EnvironmentError(f"Faltan variables de entorno: {', '.join(missing)}")
 
+    persistence = PicklePersistence(filepath="bot_persistence.pickle")
+
     app = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
+        .persistence(persistence)
         .read_timeout(60)
         .write_timeout(60)
         .connect_timeout(60)
@@ -383,17 +359,15 @@ def main():
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("ayuda", cmd_help))
-    app.add_handler(CommandHandler("help",  cmd_help))
-    app.add_handler(CommandHandler("modo",  cmd_modo))
-    app.add_handler(
-        MessageHandler(filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE, handle_audio)
-    )
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("modo", cmd_modo))
+    app.add_handler(CallbackQueryHandler(cb_modo, pattern="^toggle_summary$"))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE, handle_audio))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(error_handler)
 
     logger.info("Bot iniciado. Esperando mensajes...")
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     import asyncio as _asyncio
