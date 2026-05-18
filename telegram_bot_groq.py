@@ -219,7 +219,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
-    status_msg = await message.reply_text("⏳ Descargando audio…")
+    status_msg = await message.reply_text("Descargando audio…")
     tmp_path = None
 
     try:
@@ -229,7 +229,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await tg_file.download_to_drive(tmp_path)
 
         # ── 4. Transcribir ────────────────────────────────────────────────────
-        await status_msg.edit_text("🎙️ Transcribiendo…")
+        await status_msg.edit_text("Transcribiendo…")
         transcription = transcribe(tmp_path)
 
         if not transcription:
@@ -247,7 +247,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if needs_summary:
             await status_msg.edit_text("📌 Generando resumen…")
             summary = summarize(transcription)
-            parts.append(f"📌 *Resumen:*\n\n{summary}")
+            parts.append(f"*Resumen:*\n\n{summary}")
         elif mode == MODE_BOTH and duration < SUMMARY_MIN_SECONDS:
             parts.append(
                 f"_ℹEl audio dura {format_duration(duration)}, "
