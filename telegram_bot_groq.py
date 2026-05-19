@@ -46,11 +46,12 @@ MAX_TELEGRAM_LENGTH    = 4096     # Límite de Telegram por mensaje
 MAX_SUMMARY_INPUT      = 12000    # Caracteres máximos que se envían al modelo
 PROCESSING_CONCURRENCY = 2        # Audios simultáneos permitidos
 
-# Pausa real entre segmentos de Whisper para abrir nuevo párrafo
-PAUSE_THRESHOLD        = 1.2      # segundos
-
-# Límite secundario: si un párrafo acumulado supera esto, se corta igual
-MAX_PARAGRAPH_CHARS    = 600
+# Pausa larga: siempre abre párrafo nuevo
+PAUSE_THRESHOLD        = 0.92      # segundos
+# Pausa corta: abre párrafo solo si el segmento acaba en punto/cierre de frase
+SHORT_PAUSE_THRESHOLD  = 0.34      # segundos
+# Límite de longitud: abre párrafo solo si el segmento acaba en punto/cierre de frase
+MAX_PARAGRAPH_CHARS    = 500
 
 # Retardo entre párrafos en el reveal progresivo
 STREAM_DELAY           = 0.5      # segundos
@@ -72,15 +73,29 @@ def _seg_attr(seg, key: str, default=None):
     return getattr(seg, key, default)
 
 
+_SENTENCE_END = re.compile(r'[.?!\u2026\u203c\u2049]"?\s*$')
+
+
+def _ends_sentence(text: str) -> bool:
+    """Devuelve True si el texto termina en cierre de frase."""
+    return bool(_SENTENCE_END.search(text))
+
+
 def paragraphs_from_segments(segments: list) -> str:
     """
-    Agrupa los segmentos de Whisper en párrafos según dos criterios:
-      1. Pausa real >= PAUSE_THRESHOLD entre el fin de un segmento
-         y el inicio del siguiente.
-      2. El párrafo acumulado supera MAX_PARAGRAPH_CHARS (fallback
-         para audios donde casi no hay pausas largas).
+    Agrupa los segmentos de Whisper en párrafos con tres niveles de corte,
+    garantizando que nunca se parte una frase a mitad:
 
-    Limpia espacios y caracteres de control innecesarios en cada segmento.
+      1. Pausa larga (>= PAUSE_THRESHOLD)
+         → siempre abre párrafo nuevo, independientemente de la puntuación.
+
+      2. Pausa corta (>= SHORT_PAUSE_THRESHOLD) + segmento acaba en .?!
+         → el hablante hizo una pausa natural tras terminar la idea.
+
+      3. Párrafo acumulado >= MAX_PARAGRAPH_CHARS + segmento acaba en .?!
+         → evita bloques enormes sin romper frases a mitad.
+
+    Si ningún criterio se cumple, el segmento se une al párrafo actual.
     """
     if not segments:
         return ""
@@ -90,28 +105,32 @@ def paragraphs_from_segments(segments: list) -> str:
     current_chars = 0
 
     for i, seg in enumerate(segments):
-        raw = _seg_attr(seg, "text", "") or ""
-        text = raw.strip()
-
-        # Eliminar caracteres de control excepto espacios normales
-        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
-
+        raw  = _seg_attr(seg, "text", "") or ""
+        text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", raw.strip())
         if not text:
             continue
 
         current.append(text)
         current_chars += len(text)
 
-        # Decidir si cortar párrafo aquí
-        force_cut = current_chars >= MAX_PARAGRAPH_CHARS
+        is_last       = (i == len(segments) - 1)
+        ends_sentence = _ends_sentence(text)
 
-        pause_cut = False
-        if i < len(segments) - 1:
-            end   = _seg_attr(seg, "end", 0) or 0
+        # Calcular pausa con el siguiente segmento
+        gap = 0.0
+        if not is_last:
+            end   = _seg_attr(seg,            "end",   0) or 0
             start = _seg_attr(segments[i + 1], "start", 0) or 0
-            pause_cut = (start - end) >= PAUSE_THRESHOLD
+            gap   = max(0.0, start - end)
 
-        if pause_cut or force_cut:
+        # Nivel 1: pausa larga → cortar siempre
+        long_pause  = not is_last and gap >= PAUSE_THRESHOLD
+        # Nivel 2: pausa corta + fin de frase
+        short_pause = not is_last and gap >= SHORT_PAUSE_THRESHOLD and ends_sentence
+        # Nivel 3: párrafo demasiado largo + fin de frase
+        too_long    = current_chars >= MAX_PARAGRAPH_CHARS and ends_sentence
+
+        if long_pause or short_pause or too_long:
             paragraphs.append(" ".join(current))
             current = []
             current_chars = 0
