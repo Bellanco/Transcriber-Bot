@@ -4,6 +4,7 @@ import logging
 import tempfile
 import asyncio
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Optional, List, Tuple
 
 try:
@@ -35,6 +36,9 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
+WEBHOOK_URL    = os.environ.get("WEBHOOK_URL", "")
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+WEBHOOK_PATH   = os.environ.get("WEBHOOK_PATH", "webhook")
 
 TRANSCRIPTION_MODEL    = "whisper-large-v3"
 SUMMARY_MODEL          = "llama-3.3-70b-versatile"
@@ -272,6 +276,28 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.exception("Error no controlado", exc_info=context.error)
 
 
+def resolve_webhook_settings() -> Tuple[str, str]:
+    """
+    Normaliza webhook URL y path.
+
+    - Si WEBHOOK_URL ya incluye path (ej. /webhook), se usa ese path.
+    - Si WEBHOOK_URL no incluye path, se añade WEBHOOK_PATH.
+    """
+    raw_url = WEBHOOK_URL.strip().rstrip("/")
+    fallback_path = WEBHOOK_PATH.strip().strip("/") or "webhook"
+
+    if not raw_url:
+        raise EnvironmentError("WEBHOOK_URL no está definido")
+
+    parsed = urlparse(raw_url)
+    path_from_url = parsed.path.strip("/")
+
+    if path_from_url:
+        return raw_url, path_from_url
+
+    return f"{raw_url}/{fallback_path}", fallback_path
+
+
 # ── Groq: transcripción y resumen ─────────────────────────────────────────────
 
 async def transcribe(file_path: str) -> Tuple[str, str]:
@@ -452,7 +478,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # ── Arranque ──────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    missing = [v for v in ("TELEGRAM_TOKEN", "GROQ_API_KEY") if not os.environ.get(v)]
+    missing = [
+        v for v in ("TELEGRAM_TOKEN", "GROQ_API_KEY", "WEBHOOK_URL")
+        if not os.environ.get(v)
+    ]
     if missing:
         raise EnvironmentError(f"Faltan variables de entorno: {', '.join(missing)}")
 
@@ -475,8 +504,18 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(error_handler)
 
-    logger.info("Bot iniciado. Esperando mensajes...")
-    app.run_polling(drop_pending_updates=True)
+    port = int(os.environ.get("PORT", "8000"))
+    webhook_url, webhook_path = resolve_webhook_settings()
+    logger.info("Bot iniciado en modo webhook. Escuchando en puerto %s", port)
+    logger.info("Webhook configurado en %s", webhook_url)
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=port,
+        url_path=webhook_path,
+        webhook_url=webhook_url,
+        secret_token=WEBHOOK_SECRET or None,
+        drop_pending_updates=False,
+    )
 
 
 if __name__ == "__main__":

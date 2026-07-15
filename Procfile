@@ -1,1 +1,1 @@
-worker: python telegram_bot_groq.py
+web: python telegram_bot_groq.py
