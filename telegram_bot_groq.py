@@ -49,6 +49,7 @@ MAX_FILE_SIZE_BYTES    = MAX_FILE_SIZE_MB * 1024 * 1024
 MAX_TELEGRAM_LENGTH    = 4096     # Límite de Telegram por mensaje
 MAX_SUMMARY_INPUT      = 12000    # Caracteres máximos que se envían al modelo
 PROCESSING_CONCURRENCY = 2        # Audios simultáneos permitidos
+TRANSCRIPTION_HINTS    = os.environ.get("TRANSCRIPTION_HINTS", "")
 
 # Pausa larga: siempre abre párrafo nuevo
 PAUSE_THRESHOLD        = 0.92      # segundos
@@ -56,6 +57,10 @@ PAUSE_THRESHOLD        = 0.92      # segundos
 SHORT_PAUSE_THRESHOLD  = 0.34      # segundos
 # Límite de longitud: abre párrafo solo si el segmento acaba en punto/cierre de frase
 MAX_PARAGRAPH_CHARS    = 500
+# Evita párrafos extremadamente cortos cuando hay pausas naturales
+MIN_PARAGRAPH_CHARS    = 140
+# Si la pausa es muy larga, se fuerza el corte aunque el bloque sea corto
+FORCE_BREAK_PAUSE      = 1.45
 
 # Retardo entre párrafos en el reveal progresivo
 STREAM_DELAY           = 0.5      # segundos
@@ -83,6 +88,45 @@ _SENTENCE_END = re.compile(r'[.?!\u2026\u203c\u2049]"?\s*$')
 def _ends_sentence(text: str) -> bool:
     """Devuelve True si el texto termina en cierre de frase."""
     return bool(_SENTENCE_END.search(text))
+
+
+def _normalize_literal_text(text: str) -> str:
+    """
+    Mejora legibilidad sin alterar el contenido semántico:
+    - limpia controles
+    - elimina espacios antes de signos
+    - asegura espacio tras signos de puntuación
+    - colapsa espacios múltiples
+    """
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    text = re.sub(r"\s+([,.;:?!])", r"\1", text)
+    text = re.sub(r"([,.;:?!])(\S)", r"\1 \2", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
+
+
+def _merge_short_paragraphs(paragraphs: List[str], min_chars: int = MIN_PARAGRAPH_CHARS) -> List[str]:
+    """Une párrafos demasiado cortos con el siguiente para una lectura más natural."""
+    if not paragraphs:
+        return []
+
+    merged: List[str] = []
+    i = 0
+    while i < len(paragraphs):
+        current = paragraphs[i].strip()
+        if not current:
+            i += 1
+            continue
+
+        if len(current) < min_chars and i + 1 < len(paragraphs):
+            next_paragraph = paragraphs[i + 1].strip()
+            merged.append(_normalize_literal_text(f"{current} {next_paragraph}"))
+            i += 2
+        else:
+            merged.append(_normalize_literal_text(current))
+            i += 1
+
+    return merged
 
 
 def paragraphs_from_segments(segments: list) -> str:
@@ -127,20 +171,27 @@ def paragraphs_from_segments(segments: list) -> str:
             start = _seg_attr(segments[i + 1], "start", 0) or 0
             gap   = max(0.0, start - end)
 
-        # Nivel 1: pausa larga → cortar siempre
+        # Nivel 1: pausa larga
         long_pause  = not is_last and gap >= PAUSE_THRESHOLD
+        force_break = not is_last and gap >= FORCE_BREAK_PAUSE
         # Nivel 2: pausa corta + fin de frase
         short_pause = not is_last and gap >= SHORT_PAUSE_THRESHOLD and ends_sentence
         # Nivel 3: párrafo demasiado largo + fin de frase
         too_long    = current_chars >= MAX_PARAGRAPH_CHARS and ends_sentence
 
+        # Si el bloque es muy corto, evitar corte prematuro salvo pausa muy marcada.
+        if long_pause and current_chars < MIN_PARAGRAPH_CHARS and not force_break:
+            long_pause = False
+
         if long_pause or short_pause or too_long:
-            paragraphs.append(" ".join(current))
+            paragraphs.append(_normalize_literal_text(" ".join(current)))
             current = []
             current_chars = 0
 
     if current:
-        paragraphs.append(" ".join(current))
+        paragraphs.append(_normalize_literal_text(" ".join(current)))
+
+    paragraphs = _merge_short_paragraphs(paragraphs)
 
     return "\n\n".join(paragraphs)
 
@@ -152,8 +203,7 @@ def clean_transcription(text: str) -> str:
     - Colapsa espacios múltiples
     - Asegura que las frases empiecen con mayúscula tras punto
     """
-    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
-    text = re.sub(r" {2,}", " ", text)
+    text = _normalize_literal_text(text)
     text = re.sub(r"(\.) ([a-záéíóúüñ])", lambda m: m.group(1) + " " + m.group(2).upper(), text)
     return text.strip()
 
@@ -161,22 +211,25 @@ def clean_transcription(text: str) -> str:
 def format_summary(text: str) -> str:
     """
     Normaliza el resumen:
-    - Convierte *, - y · como viñetas a •
-    - Añade línea en blanco antes de cada viñeta
+    - Elimina viñetas o numeraciones si aparecen
+    - Mantiene bloques en párrafos simples
     - Limpia líneas vacías duplicadas
     """
     lines = text.splitlines()
-    out = []
+    cleaned: List[str] = []
+
     for line in lines:
         line = line.strip()
         if not line:
-            out.append("")
+            cleaned.append("")
             continue
-        line = re.sub(r"^[\*\-·]\s+", "• ", line)
-        out.append(line)
 
-    result = "\n".join(out)
-    result = re.sub(r"\n(•)", r"\n\n\1", result)
+        # Si el modelo devuelve listas, las convertimos a texto corrido.
+        line = re.sub(r"^[\*\-•·]\s+", "", line)
+        line = re.sub(r"^\d+[\.)]\s+", "", line)
+        cleaned.append(line)
+
+    result = "\n".join(cleaned)
     result = re.sub(r"\n{3,}", "\n\n", result)
     return result.strip()
 
@@ -308,13 +361,19 @@ async def transcribe(file_path: str) -> Tuple[str, str]:
     Devuelve (texto_plano, texto_con_párrafos).
     El texto plano se usa para el resumen; el formateado para mostrar.
     """
+    transcription_kwargs = {
+        "model": TRANSCRIPTION_MODEL,
+        "file": None,
+        "language": "es",
+        "response_format": "verbose_json",
+    }
+
+    if TRANSCRIPTION_HINTS.strip():
+        transcription_kwargs["prompt"] = TRANSCRIPTION_HINTS.strip()
+
     with open(file_path, "rb") as f:
-        result = await groq_client.audio.transcriptions.create(
-            model=TRANSCRIPTION_MODEL,
-            file=f,
-            language="es",
-            response_format="verbose_json",
-        )
+        transcription_kwargs["file"] = f
+        result = await groq_client.audio.transcriptions.create(**transcription_kwargs)
 
     segments = getattr(result, "segments", None) or []
 
@@ -336,21 +395,20 @@ async def transcribe(file_path: str) -> Tuple[str, str]:
 
 
 async def summarize(text: str) -> str:
-    """Genera un resumen estructurado con Llama 3 via Groq."""
+    """Genera un resumen breve y natural con lenguaje sencillo."""
     response = await groq_client.chat.completions.create(
         model=SUMMARY_MODEL,
         max_tokens=500,
-        temperature=0.3,
+        temperature=0.2,
         messages=[
             {
                 "role": "system",
                 "content": (
-                    "Eres un asistente que resume textos en español de forma clara y directa.\n\n"
-                    "Estructura tu respuesta así:\n"
-                    "1. Un párrafo breve con la idea principal.\n"
-                    "2. Una lista de puntos clave usando exactamente el carácter • al inicio de cada punto.\n\n"
-                    "No uses *, - ni ningún otro carácter como viñeta. Solo •.\n"
-                    "No añadas saludos, despedidas ni explicaciones."
+                    "Eres un asistente que resume audios en español con lenguaje muy sencillo, natural y cercano.\n\n"
+                    "Devuelve únicamente texto en párrafos cortos, sin viñetas, sin numeraciones y sin títulos.\n"
+                    "Incluye primero la idea principal y después los datos más importantes en párrafos separados.\n"
+                    "Usa frases claras para cualquier persona, evita tecnicismos y evita repetir ideas.\n"
+                    "No añadas saludos, despedidas ni explicaciones extra."
                 ),
             },
             {
