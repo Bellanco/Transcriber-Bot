@@ -36,7 +36,6 @@ Configura estas variables en Render:
 - `WEBHOOK_URL` = URL publica de Render
 - `WEBHOOK_SECRET` = cadena aleatoria larga
 - `WEBHOOK_PATH` = `webhook` (opcional)
-- `TRANSCRIPTION_HINTS` = (opcional) nombres propios/terminos que quieras preservar
 
 ### Formas validas de WEBHOOK_URL
 
@@ -87,6 +86,3 @@ Debe mostrar:
   - valida `getWebhookInfo` y que la URL sea HTTPS publica.
 - Timeouts en audio largo:
   - prueba audios mas cortos o baja concurrencia (`PROCESSING_CONCURRENCY=1`).
-- Terminos mal transcritos:
-  - define `TRANSCRIPTION_HINTS` con nombres o jerga esperada, por ejemplo:
-    - `TRANSCRIPTION_HINTS=Francia, Inglaterra, Hong Kong, Champions, Mbappe`
