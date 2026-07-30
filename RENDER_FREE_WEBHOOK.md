@@ -70,7 +70,7 @@ Debe mostrar:
 1. En Telegram manda `/start`.
 2. Manda `/modo`.
 3. Envia una nota de voz corta.
-4. Envia un audio mas largo para validar resumen.
+4. Envia un audio mas largo para validar transcripcion por trozos y resumen.
 
 ## 7) Limitaciones esperadas en Free
 
@@ -85,4 +85,9 @@ Debe mostrar:
 - Webhook no llega:
   - valida `getWebhookInfo` y que la URL sea HTTPS publica.
 - Timeouts en audio largo:
-  - prueba audios mas cortos o baja concurrencia (`PROCESSING_CONCURRENCY=1`).
+  - el bot ya divide audios largos automaticamente en trozos usando `ffmpeg`.
+  - si sigue habiendo cortes, baja concurrencia (`PROCESSING_CONCURRENCY=1`) y revisa logs.
+  - ajusta trozos con variables en `telegram_bot_groq.py`:
+    - `AUDIO_CHUNK_SECONDS`
+    - `AUDIO_CHUNK_OVERLAP_SECONDS`
+    - `TRANSCRIBE_MAX_RETRIES`

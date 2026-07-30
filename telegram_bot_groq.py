@@ -3,9 +3,11 @@ import re
 import logging
 import tempfile
 import asyncio
+import subprocess
+import shutil
 from pathlib import Path
 from urllib.parse import urlparse
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 
 try:
     from dotenv import load_dotenv
@@ -49,6 +51,16 @@ MAX_FILE_SIZE_BYTES    = MAX_FILE_SIZE_MB * 1024 * 1024
 MAX_TELEGRAM_LENGTH    = 4096     # Límite de Telegram por mensaje
 MAX_SUMMARY_INPUT      = 12000    # Caracteres máximos que se envían al modelo
 PROCESSING_CONCURRENCY = 2        # Audios simultáneos permitidos
+
+# Audios largos: dividir y transcribir en trozos
+LONG_AUDIO_THRESHOLD_SECONDS = 20 * 60
+AUDIO_CHUNK_SECONDS          = 5 * 60
+AUDIO_CHUNK_OVERLAP_SECONDS  = 45
+
+# Resiliencia de peticiones de transcripción
+GROQ_TIMEOUT_SECONDS     = 180
+TRANSCRIBE_MAX_RETRIES   = 3
+RETRY_BASE_SECONDS       = 2.0
 
 # Pausa larga: siempre abre párrafo nuevo
 PAUSE_THRESHOLD        = 0.92      # segundos
@@ -156,6 +168,231 @@ def clean_transcription(text: str) -> str:
     text = re.sub(r" {2,}", " ", text)
     text = re.sub(r"(\.) ([a-záéíóúüñ])", lambda m: m.group(1) + " " + m.group(2).upper(), text)
     return text.strip()
+
+
+def _normalize_segment(seg: Any, offset: float = 0.0) -> Optional[Dict[str, Any]]:
+    """Convierte un segmento de Groq a dict normalizado con offset opcional."""
+    raw_text = _seg_attr(seg, "text", "") or ""
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", raw_text.strip())
+    if not text:
+        return None
+
+    start = float(_seg_attr(seg, "start", 0.0) or 0.0) + offset
+    end = float(_seg_attr(seg, "end", 0.0) or 0.0) + offset
+    if end < start:
+        end = start
+
+    return {
+        "text": text,
+        "start": start,
+        "end": end,
+    }
+
+
+def _plain_from_segments(segments: List[Dict[str, Any]]) -> str:
+    """Construye texto plano limpio a partir de segmentos normalizados."""
+    if not segments:
+        return ""
+    plain = " ".join(s["text"] for s in segments if s.get("text"))
+    return clean_transcription(plain)
+
+
+def _merge_segments_with_overlap(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Ordena y deduplica segmentos por ventana temporal para evitar duplicados."""
+    if not segments:
+        return []
+
+    ordered = sorted(segments, key=lambda s: (float(s.get("start", 0.0)), float(s.get("end", 0.0))))
+    merged: List[Dict[str, Any]] = []
+    for seg in ordered:
+        if not merged:
+            merged.append(seg)
+            continue
+
+        prev = merged[-1]
+        same_text = (seg.get("text", "").strip().lower() == prev.get("text", "").strip().lower())
+        close_time = abs(float(seg.get("start", 0.0)) - float(prev.get("start", 0.0))) <= 1.2
+        if same_text and close_time:
+            continue
+
+        merged.append(seg)
+
+    return merged
+
+
+def _ffmpeg_is_available() -> bool:
+    return shutil.which("ffmpeg") is not None
+
+
+def _build_audio_chunks_with_ffmpeg(file_path: str, duration_seconds: int) -> Tuple[List[Tuple[str, float]], str]:
+    """
+    Divide audio en trozos temporales usando ffmpeg.
+    Devuelve lista de (path_chunk, offset_inicio_segundos) y carpeta temporal.
+    """
+    if duration_seconds <= 0:
+        raise ValueError("Duración inválida para chunking")
+
+    if not _ffmpeg_is_available():
+        raise RuntimeError("ffmpeg no está disponible en el entorno")
+
+    chunk_dir = tempfile.mkdtemp(prefix="tg_chunks_")
+    chunk_paths: List[Tuple[str, float]] = []
+
+    step = max(1, AUDIO_CHUNK_SECONDS - AUDIO_CHUNK_OVERLAP_SECONDS)
+    start = 0.0
+    index = 0
+
+    while start < duration_seconds:
+        remaining = max(0.0, float(duration_seconds) - start)
+        chunk_len = min(float(AUDIO_CHUNK_SECONDS), remaining)
+        if chunk_len <= 0:
+            break
+
+        chunk_path = os.path.join(chunk_dir, f"chunk_{index:03d}.flac")
+        cmd = [
+            "ffmpeg",
+            "-v", "error",
+            "-y",
+            "-ss", f"{start:.3f}",
+            "-t", f"{chunk_len:.3f}",
+            "-i", file_path,
+            "-vn",
+            "-ac", "1",
+            "-ar", "16000",
+            "-c:a", "flac",
+            chunk_path,
+        ]
+
+        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg falló al crear chunks: {proc.stderr.strip() or 'error desconocido'}")
+
+        if os.path.exists(chunk_path) and os.path.getsize(chunk_path) > 0:
+            chunk_paths.append((chunk_path, start))
+
+        start += float(step)
+        index += 1
+
+    if not chunk_paths:
+        raise RuntimeError("No se pudieron generar chunks de audio")
+
+    return chunk_paths, chunk_dir
+
+
+def _is_retryable_api_error(exc: APIError) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    if status_code is None:
+        return False
+    return int(status_code) >= 500
+
+
+async def _transcribe_request(file_path: str):
+    with open(file_path, "rb") as f:
+        try:
+            return await groq_client.audio.transcriptions.create(
+                model=TRANSCRIPTION_MODEL,
+                file=f,
+                language="es",
+                response_format="verbose_json",
+                timeout=GROQ_TIMEOUT_SECONDS,
+            )
+        except TypeError:
+            # Compatibilidad con versiones del SDK que no aceptan timeout por petición.
+            f.seek(0)
+            return await groq_client.audio.transcriptions.create(
+                model=TRANSCRIPTION_MODEL,
+                file=f,
+                language="es",
+                response_format="verbose_json",
+            )
+
+
+async def _transcribe_with_retry(file_path: str):
+    last_error: Optional[Exception] = None
+    for attempt in range(1, TRANSCRIBE_MAX_RETRIES + 1):
+        try:
+            return await _transcribe_request(file_path)
+        except (RateLimitError, APITimeoutError) as e:
+            last_error = e
+            if attempt == TRANSCRIBE_MAX_RETRIES:
+                raise
+            wait_s = RETRY_BASE_SECONDS * attempt
+            logger.warning("Reintento %s/%s por error transitorio: %s", attempt, TRANSCRIBE_MAX_RETRIES, e)
+            await asyncio.sleep(wait_s)
+        except APIError as e:
+            last_error = e
+            if attempt == TRANSCRIBE_MAX_RETRIES or not _is_retryable_api_error(e):
+                raise
+            wait_s = RETRY_BASE_SECONDS * attempt
+            logger.warning("Reintento %s/%s por APIError recuperable: %s", attempt, TRANSCRIBE_MAX_RETRIES, e)
+            await asyncio.sleep(wait_s)
+
+    if last_error:
+        raise last_error
+    raise RuntimeError("Fallo inesperado al transcribir")
+
+
+def _parse_transcription_result(result: Any, offset: float = 0.0) -> Tuple[str, List[Dict[str, Any]]]:
+    """Extrae texto plano y segmentos normalizados desde la respuesta de Groq."""
+    raw_segments = getattr(result, "segments", None) or []
+    segments: List[Dict[str, Any]] = []
+
+    for seg in raw_segments:
+        normalized = _normalize_segment(seg, offset=offset)
+        if normalized:
+            segments.append(normalized)
+
+    if segments:
+        plain = _plain_from_segments(segments)
+    else:
+        plain = clean_transcription(getattr(result, "text", "") or "")
+
+    return plain, segments
+
+
+async def transcribe_long_audio(file_path: str, duration: int, status_msg: Optional[Message] = None) -> Tuple[str, str]:
+    """
+    Transcribe audios largos por chunks con ffmpeg y une resultados.
+    """
+    chunks, chunk_dir = _build_audio_chunks_with_ffmpeg(file_path, duration)
+    total_chunks = len(chunks)
+    logger.info("Audio largo detectado: %ss, %s chunks", duration, total_chunks)
+
+    all_segments: List[Dict[str, Any]] = []
+    fallback_plain_parts: List[str] = []
+
+    try:
+        for idx, (chunk_path, start_offset) in enumerate(chunks, start=1):
+            if status_msg:
+                await safe_edit(status_msg, f"Transcribiendo audio largo... {idx}/{total_chunks}")
+
+            result = await _transcribe_with_retry(chunk_path)
+            chunk_plain, chunk_segments = _parse_transcription_result(result, offset=0.0)
+
+            if chunk_segments:
+                # Evita duplicar la zona de solape al incorporar chunks no iniciales.
+                for seg in chunk_segments:
+                    local_end = float(seg.get("end", 0.0))
+                    if idx > 1 and local_end <= AUDIO_CHUNK_OVERLAP_SECONDS:
+                        continue
+                    all_segments.append({
+                        "text": seg["text"],
+                        "start": float(seg.get("start", 0.0)) + start_offset,
+                        "end": float(seg.get("end", 0.0)) + start_offset,
+                    })
+            elif chunk_plain:
+                fallback_plain_parts.append(chunk_plain)
+
+        merged_segments = _merge_segments_with_overlap(all_segments)
+        if merged_segments:
+            plain = _plain_from_segments(merged_segments)
+            formatted = paragraphs_from_segments(merged_segments)
+            return plain, formatted
+
+        plain = clean_transcription(" ".join(fallback_plain_parts))
+        return plain, plain
+    finally:
+        shutil.rmtree(chunk_dir, ignore_errors=True)
 
 
 def format_summary(text: str) -> str:
@@ -311,28 +548,12 @@ async def transcribe(file_path: str) -> Tuple[str, str]:
     Devuelve (texto_plano, texto_con_párrafos).
     El texto plano se usa para el resumen; el formateado para mostrar.
     """
-    with open(file_path, "rb") as f:
-        result = await groq_client.audio.transcriptions.create(
-            model=TRANSCRIPTION_MODEL,
-            file=f,
-            language="es",
-            response_format="verbose_json",
-        )
-
-    segments = getattr(result, "segments", None) or []
+    result = await _transcribe_with_retry(file_path)
+    plain, segments = _parse_transcription_result(result)
 
     if segments:
-        # Construir texto plano desde segmentos (más limpio que result.text)
-        plain = " ".join(
-            (_seg_attr(s, "text") or "").strip()
-            for s in segments
-            if (_seg_attr(s, "text") or "").strip()
-        )
-        plain     = clean_transcription(plain)
         formatted = paragraphs_from_segments(segments)
     else:
-        # Fallback: Groq no devolvió segmentos
-        plain     = clean_transcription(getattr(result, "text", "") or "")
         formatted = plain
 
     return plain, formatted
@@ -384,7 +605,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/ayuda — Esta ayuda\n\n"
         "Formatos aceptados:\n"
         "Notas de voz, MP3, M4A, WAV, OGG, FLAC, MP4\n\n"
-        f"Tamaño máximo: {MAX_FILE_SIZE_MB} MB"
+        f"Tamaño máximo: {MAX_FILE_SIZE_MB} MB\n"
+        "Audios largos: se procesan automáticamente en trozos."
     )
 
 
@@ -437,7 +659,15 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 tmp_path = tmp.name
             await tg_file.download_to_drive(tmp_path)
 
-            plain, formatted = await transcribe(tmp_path)
+            if duration >= LONG_AUDIO_THRESHOLD_SECONDS:
+                if not _ffmpeg_is_available():
+                    await safe_edit(status_msg, "No se puede procesar audio largo ahora. Falta ffmpeg en el servidor.")
+                    return
+                await safe_edit(status_msg, "Preparando audio largo...")
+                plain, formatted = await transcribe_long_audio(tmp_path, duration, status_msg=status_msg)
+            else:
+                await safe_edit(status_msg, "Transcribiendo...")
+                plain, formatted = await transcribe(tmp_path)
 
             if not plain:
                 await safe_edit(status_msg, "No se detectó voz en el audio.")
@@ -486,6 +716,11 @@ def main() -> None:
     ]
     if missing:
         raise EnvironmentError(f"Faltan variables de entorno: {', '.join(missing)}")
+
+    if _ffmpeg_is_available():
+        logger.info("ffmpeg detectado: procesamiento de audios largos habilitado")
+    else:
+        logger.warning("ffmpeg no detectado: audios largos pueden fallar")
 
     app = (
         Application.builder()
