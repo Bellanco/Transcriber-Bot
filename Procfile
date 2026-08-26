@@ -1,1 +1,1 @@
-web: python telegram_bot_groq.py
+web: python main.py

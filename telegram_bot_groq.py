@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import logging
 import tempfile
 import asyncio
@@ -395,30 +396,100 @@ async def transcribe_long_audio(file_path: str, duration: int, status_msg: Optio
         shutil.rmtree(chunk_dir, ignore_errors=True)
 
 
-def format_summary(text: str) -> str:
-    """
-    Normaliza el resumen:
-    - Elimina viñetas o numeraciones si aparecen
-    - Mantiene bloques en párrafos simples
-    - Limpia líneas vacías duplicadas
-    """
-    lines = text.splitlines()
-    cleaned: List[str] = []
+def _truncate_words(text: str, max_words: int = 22) -> str:
+    """Recorta una frase a un máximo de palabras para mantenerla escaneable."""
+    words = text.split()
+    if len(words) <= max_words:
+        return text.strip()
+    return " ".join(words[:max_words]).strip(" ,;:") + "..."
 
-    for line in lines:
-        line = line.strip()
-        if not line:
-            cleaned.append("")
+
+def _extract_json_payload(raw_text: str) -> Optional[str]:
+    """Extrae un bloque JSON desde texto libre o dentro de ```json ... ```."""
+    if not raw_text:
+        return None
+
+    fenced = re.search(r"```json\s*(.*?)\s*```", raw_text, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        return fenced.group(1).strip()
+
+    # Fallback: intenta tomar desde el primer '[' hasta el ultimo ']'.
+    start = raw_text.find("[")
+    end = raw_text.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        return raw_text[start:end + 1].strip()
+
+    return None
+
+
+def _format_summary_from_topics(topics: List[Dict[str, Any]]) -> str:
+    """Renderiza temas en formato fijo y en orden cronologico."""
+    if not topics:
+        return ""
+
+    normalized: List[Tuple[float, int, str, str]] = []
+    for idx, item in enumerate(topics):
+        if not isinstance(item, dict):
             continue
 
-        # Si el modelo devuelve listas, las convertimos a texto corrido.
-        line = re.sub(r"^[\*\-•·]\s+", "", line)
-        line = re.sub(r"^\d+[\.)]\s+", "", line)
-        cleaned.append(line)
+        topic = str(item.get("tema", "")).strip(" .,-") or "Tema"
+        summary = str(item.get("resumen", "")).strip(" .,-")
+        if not summary:
+            continue
 
-    result = "\n".join(cleaned)
-    result = re.sub(r"\n{3,}", "\n\n", result)
-    return result.strip()
+        order_raw = item.get("posicion_inicial", None)
+        try:
+            order_value = float(order_raw)
+        except (TypeError, ValueError):
+            order_value = float("inf")
+
+        normalized.append((order_value, idx, topic, _truncate_words(summary)))
+
+    if not normalized:
+        return ""
+
+    normalized.sort(key=lambda t: (t[0], t[1]))
+    bullets = [f"• {topic}: {summary}" for _, _, topic, summary in normalized]
+    return "\n".join(bullets)
+
+
+def format_summary(text: str) -> str:
+    """
+    Normaliza el resumen para formato de vistazo:
+    - Una línea por tema
+    - Formato fijo: "• Tema: frase breve"
+    - Frases compactas para lectura rápida
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    bullets: List[str] = []
+
+    for raw_line in lines:
+        line = re.sub(r"^[\*\-•·]\s+", "", raw_line)
+        line = re.sub(r"^\d+[\.)]\s+", "", line)
+        line = re.sub(r"\s+", " ", line).strip()
+        if not line:
+            continue
+
+        if ":" in line:
+            topic, summary = line.split(":", 1)
+            topic = topic.strip(" .,-") or "Tema"
+            summary = summary.strip(" .,-")
+            if not summary:
+                continue
+            summary = _truncate_words(summary)
+            bullets.append(f"• {topic}: {summary}")
+        else:
+            summary = _truncate_words(line.strip(" .,-"))
+            if summary:
+                bullets.append(f"• Tema: {summary}")
+
+    if bullets:
+        return "\n".join(bullets)
+
+    compact = re.sub(r"\s+", " ", text).strip()
+    if not compact:
+        return "• Tema general: No se detectaron ideas suficientes para resumir."
+    return f"• Tema general: {_truncate_words(compact)}"
 
 
 # ── Partición de mensajes largos ──────────────────────────────────────────────
@@ -560,7 +631,7 @@ async def transcribe(file_path: str) -> Tuple[str, str]:
 
 
 async def summarize(text: str) -> str:
-    """Genera un resumen breve y natural con lenguaje sencillo."""
+    """Genera un resumen por temas en formato de puntos breves y escaneables."""
     response = await groq_client.chat.completions.create(
         model=SUMMARY_MODEL,
         max_tokens=500,
@@ -569,11 +640,20 @@ async def summarize(text: str) -> str:
             {
                 "role": "system",
                 "content": (
-                    "Eres un asistente que resume audios en español con lenguaje muy sencillo, natural y cercano.\n\n"
-                    "Devuelve únicamente texto en párrafos cortos, sin viñetas, sin numeraciones y sin títulos.\n"
-                    "Incluye primero la idea principal y después los puntos más importantes, con un párrafo por idea clave.\n"
-                    "Usa frases claras para cualquier persona, evita tecnicismos y evita repetir ideas.\n"
-                    "No añadas saludos, despedidas ni explicaciones extra."
+                    "Eres un asistente que resume audios en español (castellano) de forma clara y directa.\n\n"
+                    "Analiza el texto y detecta sus temas en orden cronologico de aparicion.\n"
+                    "Devuelve SOLO JSON valido (sin texto extra) con este esquema exacto:\n"
+                    "[\n"
+                    "  {\"tema\":\"...\",\"resumen\":\"...\",\"posicion_inicial\":123}\n"
+                    "]\n\n"
+                    "Reglas obligatorias:\n"
+                    "1) Detecta todos los temas del audio (sin limite fijo de puntos).\n"
+                    "2) Respeta estrictamente el orden cronologico de aparicion de temas.\n"
+                    "3) Cada tema debe tener una sola frase breve (10 a 22 palabras), clara y sin rodeos.\n"
+                    "4) posicion_inicial debe ser el indice aproximado (en caracteres) donde ese tema aparece por primera vez en el texto.\n"
+                    "5) No uses markdown, no uses bloques de codigo, no agregues explicaciones.\n"
+                    "6) Si no hay temas claros, devuelve un unico objeto con tema='Tema general'.\n"
+                    "7) Responde siempre en castellano (español), aunque el audio mezcle otros idiomas."
                 ),
             },
             {
@@ -583,6 +663,18 @@ async def summarize(text: str) -> str:
         ],
     )
     raw = response.choices[0].message.content.strip()
+
+    payload = _extract_json_payload(raw)
+    if payload:
+        try:
+            parsed = json.loads(payload)
+            if isinstance(parsed, list):
+                rendered = _format_summary_from_topics(parsed)
+                if rendered:
+                    return rendered
+        except json.JSONDecodeError:
+            logger.warning("Respuesta de resumen no vino en JSON valido; usando fallback.")
+
     return format_summary(raw)
 
 
