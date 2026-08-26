@@ -44,7 +44,7 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 WEBHOOK_PATH   = os.environ.get("WEBHOOK_PATH", "webhook")
 
 TRANSCRIPTION_MODEL    = "whisper-large-v3"
-SUMMARY_MODEL          = "llama-3.3-70b-versatile"
+SUMMARY_MODEL          = os.environ.get("SUMMARY_MODEL", "qwen/qwen3.8-27b")
 
 SUMMARY_MIN_SECONDS    = 40       # Duración mínima para generar resumen
 MAX_FILE_SIZE_MB       = 20

@@ -265,17 +265,17 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     )
                 except asyncio.TimeoutError:
                     logger.error("Timeout al generar resumen")
-                    await safe_edit(
-                        summary_status,
-                        "⚠️ El resumen tardó demasiado y se canceló.\n"
-                        "La transcripción está arriba.",
+                    await safe_delete(summary_status)
+                    await last_msg.reply_text(
+                        "⚠️ No se pudo generar el resumen porque la solicitud tardó demasiado.\n"
+                        "La transcripción está arriba."
                     )
                 except Exception as e:
                     logger.error("Error al generar resumen: %s", e)
-                    await safe_edit(
-                        summary_status,
-                        "⚠️ No se pudo generar el resumen.\n"
-                        "La transcripción está arriba.",
+                    await safe_delete(summary_status)
+                    await last_msg.reply_text(
+                        "⚠️ No se pudo generar el resumen por un error del servicio.\n"
+                        "La transcripción está arriba."
                     )
 
     except Exception as e:

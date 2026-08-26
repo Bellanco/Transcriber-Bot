@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 from telegram import Message
 from telegram.error import TelegramError, BadRequest
 from groq import AsyncGroq, APIError
+from config import SUMMARY_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ async def validate_groq_api(api_key: str) -> Tuple[bool, str]:
         client = AsyncGroq(api_key=api_key)
         # Hacer un llamado muy rápido para validar que la key funciona
         await client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=SUMMARY_MODEL,
             max_tokens=1,
             messages=[{"role": "user", "content": "hi"}],
             timeout=10,

@@ -26,7 +26,7 @@ TELEGRAM_API_FILE_URL = os.environ.get("TELEGRAM_API_FILE_URL", "http://localhos
 # ── Modelos Groq ──────────────────────────────────────────────────────────────
 
 TRANSCRIPTION_MODEL = "whisper-large-v3"
-SUMMARY_MODEL = "llama-3.3-70b-versatile"
+SUMMARY_MODEL = os.environ.get("SUMMARY_MODEL", "qwen/qwen3.8-27b")
 
 # ── Límites y umbrales ────────────────────────────────────────────────────────
 
