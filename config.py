@@ -39,15 +39,27 @@ PROCESSING_CONCURRENCY = 2  # Audios simultáneos permitidos
 
 # ── Audio largo: chunking ─────────────────────────────────────────────────────
 
-LONG_AUDIO_THRESHOLD_SECONDS = 20 * 60  # 20 minutos
+# Antes: 20 min. Audios de ~10-12 min en una sola petición podían superar
+# GROQ_TIMEOUT_SECONDS y agotar todos los reintentos sin dar feedback (~9 min
+# de espera silenciosa). Se baja el umbral para trocear antes y mostrar progreso.
+LONG_AUDIO_THRESHOLD_SECONDS = 6 * 60  # 6 minutos
 AUDIO_CHUNK_SECONDS = 5 * 60  # Trozos de 5 minutos
 AUDIO_CHUNK_OVERLAP_SECONDS = 45  # Solapo para evitar cortes
 
 # ── Reintentos y timeouts ─────────────────────────────────────────────────────
 
-GROQ_TIMEOUT_SECONDS = 180
+GROQ_TIMEOUT_SECONDS = 120
 TRANSCRIBE_MAX_RETRIES = 3
 RETRY_BASE_SECONDS = 2.0
+
+# Timeout específico para la llamada de resumen (más corta que la transcripción).
+SUMMARY_TIMEOUT_SECONDS = 60
+SUMMARY_MAX_RETRIES = 2
+
+# Guardarraíl mínimo de timeout para transcripción.
+# El handler calcula un timeout dinámico según duración/chunks y aplica al menos
+# este mínimo para evitar esperas indefinidas.
+PROCESSING_TIMEOUT_SECONDS = 8 * 60
 
 # ── Formateo de párrafos ──────────────────────────────────────────────────────
 

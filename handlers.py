@@ -4,6 +4,7 @@ import os
 import tempfile
 import logging
 import asyncio
+import math
 from pathlib import Path
 from typing import Optional
 
@@ -16,8 +17,16 @@ from config import (
     MAX_FILE_SIZE_BYTES,
     SUMMARY_MIN_SECONDS,
     LONG_AUDIO_THRESHOLD_SECONDS,
+    AUDIO_CHUNK_SECONDS,
+    AUDIO_CHUNK_OVERLAP_SECONDS,
     MAX_SUMMARY_INPUT,
     PROCESSING_CONCURRENCY,
+    PROCESSING_TIMEOUT_SECONDS,
+    GROQ_TIMEOUT_SECONDS,
+    TRANSCRIBE_MAX_RETRIES,
+    RETRY_BASE_SECONDS,
+    SUMMARY_TIMEOUT_SECONDS,
+    SUMMARY_MAX_RETRIES,
 )
 from utils import (
     safe_edit,
@@ -36,6 +45,40 @@ from formatter import stream_text
 logger = logging.getLogger(__name__)
 
 processing_semaphore = asyncio.Semaphore(PROCESSING_CONCURRENCY)
+
+
+def _retry_backoff_total(retries: int) -> float:
+    """Suma del backoff lineal de reintentos (sin contar el último intento)."""
+    if retries <= 1:
+        return 0.0
+    return RETRY_BASE_SECONDS * sum(range(1, retries))
+
+
+def _estimate_transcription_timeout(duration_seconds: int) -> float:
+    """
+    Estima timeout de transcripción según duración y estrategia (single/chunks).
+    Evita cortar audios grandes válidos y mantiene un guardarraíl mínimo global.
+    """
+    per_attempt_budget = float(GROQ_TIMEOUT_SECONDS)
+    retries_budget = per_attempt_budget * float(TRANSCRIBE_MAX_RETRIES)
+    backoff_budget = _retry_backoff_total(TRANSCRIBE_MAX_RETRIES)
+
+    if duration_seconds < LONG_AUDIO_THRESHOLD_SECONDS:
+        estimated = retries_budget + backoff_budget + 30.0
+        return max(float(PROCESSING_TIMEOUT_SECONDS), estimated)
+
+    chunk_step = max(1, AUDIO_CHUNK_SECONDS - AUDIO_CHUNK_OVERLAP_SECONDS)
+    chunk_count = max(1, math.ceil(float(duration_seconds) / float(chunk_step)))
+    per_chunk_budget = retries_budget + backoff_budget + 5.0
+    estimated = (chunk_count * per_chunk_budget) + 45.0  # margen de preparación ffmpeg
+    return max(float(PROCESSING_TIMEOUT_SECONDS), estimated)
+
+
+def _estimate_summary_timeout() -> float:
+    """Timeout máximo esperable del resumen con su propio retry policy."""
+    retries_budget = float(SUMMARY_TIMEOUT_SECONDS) * float(SUMMARY_MAX_RETRIES)
+    backoff_budget = _retry_backoff_total(SUMMARY_MAX_RETRIES)
+    return retries_budget + backoff_budget + 10.0
 
 
 # ── Comandos ──────────────────────────────────────────────────────────────────
@@ -68,7 +111,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"**Límite de tamaño:** {MAX_FILE_SIZE_MB} MB\n\n"
         "**Procesamiento:**\n"
         "  • Audios cortos: transcripción instantánea\n"
-        "  • Audios largos (> 20 min): procesamiento automático en trozos\n"
+        "  • Audios largos (> 6 min): procesamiento automático en trozos\n"
         "  • Resúmenes: disponibles para audios > 40 segundos"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
@@ -151,27 +194,46 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 )
                 return
 
-            # Transcribir
-            if duration >= LONG_AUDIO_THRESHOLD_SECONDS:
-                if not _ffmpeg_is_available():
+            # Transcribir (con timeout dinámico por duración/chunks para no
+            # cortar audios grandes válidos ni dejar esperas indefinidas).
+            async def _do_transcribe():
+                if duration >= LONG_AUDIO_THRESHOLD_SECONDS:
+                    if not _ffmpeg_is_available():
+                        return None, None, "no_ffmpeg"
+
                     await safe_edit(
                         status_msg,
-                        "❌ No se puede procesar audios > 20 min ahora.\n"
-                        "ffmpeg no está disponible en el servidor.",
+                        f"🔧 Preparando audio largo ({duration_str})...\n"
+                        "Dividiendo en trozos...",
                     )
-                    return
+                    plain, formatted = await transcribe_long_audio(
+                        tmp_path, duration, status_msg=status_msg
+                    )
+                else:
+                    await safe_edit(status_msg, "🎙️ Transcribiendo...")
+                    plain, formatted = await transcribe(tmp_path, status_msg=status_msg)
+                return plain, formatted, None
 
+            try:
+                transcription_timeout = _estimate_transcription_timeout(duration)
+                plain, formatted, special = await asyncio.wait_for(
+                    _do_transcribe(), timeout=transcription_timeout
+                )
+            except asyncio.TimeoutError:
                 await safe_edit(
                     status_msg,
-                    f"🔧 Preparando audio largo ({duration_str})...\n"
-                    "Dividiendo en trozos...",
+                    "⏱️ La transcripción tardó demasiado y se canceló.\n"
+                    "Prueba con un audio más corto o inténtalo de nuevo.",
                 )
-                plain, formatted = await transcribe_long_audio(
-                    tmp_path, duration, status_msg=status_msg
+                return
+
+            if special == "no_ffmpeg":
+                await safe_edit(
+                    status_msg,
+                    f"❌ No se puede procesar audios largos (> {LONG_AUDIO_THRESHOLD_SECONDS // 60} min) ahora.\n"
+                    "ffmpeg no está disponible en el servidor.",
                 )
-            else:
-                await safe_edit(status_msg, "🎙️ Transcribiendo...")
-                plain, formatted = await transcribe(tmp_path)
+                return
 
             # Validar que se obtuvo transcripción
             if not plain:
@@ -192,10 +254,21 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 )
 
                 try:
-                    summary = await summarize(plain[: MAX_SUMMARY_INPUT])
+                    summary_timeout = _estimate_summary_timeout()
+                    summary = await asyncio.wait_for(
+                        summarize(plain[: MAX_SUMMARY_INPUT]),
+                        timeout=summary_timeout,
+                    )
                     await summary_status.edit_text(
                         f"📌 **Resumen:**\n\n{summary}",
                         parse_mode="Markdown",
+                    )
+                except asyncio.TimeoutError:
+                    logger.error("Timeout al generar resumen")
+                    await safe_edit(
+                        summary_status,
+                        "⚠️ El resumen tardó demasiado y se canceló.\n"
+                        "La transcripción está arriba.",
                     )
                 except Exception as e:
                     logger.error("Error al generar resumen: %s", e)

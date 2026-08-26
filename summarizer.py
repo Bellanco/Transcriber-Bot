@@ -1,12 +1,19 @@
 """Lógica de resumen con Groq llama."""
 
+import asyncio
 import json
 import logging
 from typing import List, Dict, Any
 
-from groq import AsyncGroq
+from groq import AsyncGroq, APIError, RateLimitError, APITimeoutError
 
-from config import GROQ_API_KEY, SUMMARY_MODEL
+from config import (
+    GROQ_API_KEY,
+    SUMMARY_MODEL,
+    SUMMARY_TIMEOUT_SECONDS,
+    SUMMARY_MAX_RETRIES,
+    RETRY_BASE_SECONDS,
+)
 from formatter import _extract_json_payload, _format_summary_from_topics, format_summary
 
 logger = logging.getLogger(__name__)
@@ -14,17 +21,13 @@ logger = logging.getLogger(__name__)
 groq_client = AsyncGroq(api_key=GROQ_API_KEY)
 
 
-async def summarize(text: str) -> str:
-    """
-    Genera un resumen por temas en formato de puntos breves y escaneables.
-    
-    Returns:
-        Resumen formateado como bullets.
-    """
+async def _summarize_request(text: str) -> str:
+    """Hace una petición de resumen a Groq con timeout explícito."""
     response = await groq_client.chat.completions.create(
         model=SUMMARY_MODEL,
         max_tokens=500,
         temperature=0.2,
+        timeout=SUMMARY_TIMEOUT_SECONDS,
         messages=[
             {
                 "role": "system",
@@ -51,8 +54,43 @@ async def summarize(text: str) -> str:
             },
         ],
     )
+    return response.choices[0].message.content.strip()
 
-    raw = response.choices[0].message.content.strip()
+
+async def summarize(text: str) -> str:
+    """
+    Genera un resumen por temas en formato de puntos breves y escaneables.
+    Reintenta en caso de errores transitorios (rate limit, timeout).
+
+    Returns:
+        Resumen formateado como bullets.
+    """
+    raw: str = ""
+    for attempt in range(1, SUMMARY_MAX_RETRIES + 1):
+        try:
+            raw = await _summarize_request(text)
+            break
+        except (RateLimitError, APITimeoutError) as e:
+            if attempt == SUMMARY_MAX_RETRIES:
+                raise
+            logger.warning(
+                "Reintento de resumen %s/%s por error transitorio: %s",
+                attempt,
+                SUMMARY_MAX_RETRIES,
+                e,
+            )
+            await asyncio.sleep(RETRY_BASE_SECONDS * attempt)
+        except APIError as e:
+            status_code = getattr(e, "status_code", None)
+            if attempt == SUMMARY_MAX_RETRIES or not (status_code and int(status_code) >= 500):
+                raise
+            logger.warning(
+                "Reintento de resumen %s/%s por APIError recuperable: %s",
+                attempt,
+                SUMMARY_MAX_RETRIES,
+                e,
+            )
+            await asyncio.sleep(RETRY_BASE_SECONDS * attempt)
 
     # Intenta extraer y parsear JSON
     payload = _extract_json_payload(raw)

@@ -70,7 +70,9 @@ async def _transcribe_request(file_path: str) -> Any:
             )
 
 
-async def _transcribe_with_retry(file_path: str) -> Any:
+async def _transcribe_with_retry(
+    file_path: str, status_msg: Optional[Message] = None, label: str = "audio"
+) -> Any:
     """Transcribe con reintentos automáticos en caso de errores transitorios."""
     last_error: Optional[Exception] = None
 
@@ -88,6 +90,13 @@ async def _transcribe_with_retry(file_path: str) -> Any:
                 TRANSCRIBE_MAX_RETRIES,
                 e,
             )
+            # Avisa al usuario en vez de dejarlo esperando en silencio.
+            if status_msg:
+                await safe_edit(
+                    status_msg,
+                    f"⏳ Reintentando transcripción de {label} "
+                    f"({attempt}/{TRANSCRIBE_MAX_RETRIES})...",
+                )
             await asyncio.sleep(wait_s)
         except APIError as e:
             last_error = e
@@ -100,6 +109,12 @@ async def _transcribe_with_retry(file_path: str) -> Any:
                 TRANSCRIBE_MAX_RETRIES,
                 e,
             )
+            if status_msg:
+                await safe_edit(
+                    status_msg,
+                    f"⏳ Reintentando transcripción de {label} "
+                    f"({attempt}/{TRANSCRIBE_MAX_RETRIES})...",
+                )
             await asyncio.sleep(wait_s)
 
     if last_error:
@@ -173,14 +188,16 @@ def _build_audio_chunks_with_ffmpeg(
     return chunk_paths, chunk_dir
 
 
-async def transcribe(file_path: str) -> Tuple[str, str]:
+async def transcribe(
+    file_path: str, status_msg: Optional[Message] = None
+) -> Tuple[str, str]:
     """
     Transcribe un audio con Whisper.
 
     Returns:
         (texto_plano, texto_con_párrafos)
     """
-    result = await _transcribe_with_retry(file_path)
+    result = await _transcribe_with_retry(file_path, status_msg=status_msg)
     plain, segments = parse_transcription_result(result)
 
     if segments:
@@ -215,7 +232,9 @@ async def transcribe_long_audio(
                     f"⏳ Transcribiendo audio largo...\n`{idx}/{total_chunks}` trozos",
                 )
 
-            result = await _transcribe_with_retry(chunk_path)
+            result = await _transcribe_with_retry(
+                chunk_path, status_msg=status_msg, label=f"trozo {idx}/{total_chunks}"
+            )
             chunk_plain, chunk_segments = parse_transcription_result(result, offset=0.0)
 
             if chunk_segments:

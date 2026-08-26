@@ -70,7 +70,7 @@ async def validate_startup() -> bool:
         logger.info("✅ ffmpeg detectado: procesamiento de audios largos habilitado")
     else:
         logger.warning(
-            "⚠️ ffmpeg no detectado: audios > 20 min pueden fallar"
+            "⚠️ ffmpeg no detectado: audios largos pueden fallar"
         )
 
     # Verificar modo local de Bot API
