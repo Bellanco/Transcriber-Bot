@@ -8,7 +8,12 @@ import math
 from pathlib import Path
 from typing import Optional
 
-from telegram import Update, Message, ReplyKeyboardMarkup
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    Update,
+)
 from telegram.ext import ContextTypes
 from telegram.error import TelegramError
 
@@ -44,25 +49,16 @@ logger = logging.getLogger(__name__)
 
 processing_semaphore = asyncio.Semaphore(PROCESSING_CONCURRENCY)
 
-OUTPUT_MODE_BUTTONS = {
-    "Solo transcripción": "transcription",
-    "Solo resumen": "summary",
-    "Transcripción y resumen": "both",
-}
 OUTPUT_MODE_LABELS = {
     "transcription": "solo transcripción",
     "summary": "solo resumen",
     "both": "transcripción y resumen",
 }
-
-
-def _mode_keyboard() -> ReplyKeyboardMarkup:
-    """Construye el teclado persistente para seleccionar el resultado del audio."""
-    return ReplyKeyboardMarkup(
-        [["Solo transcripción", "Solo resumen"], ["Transcripción y resumen"]],
-        resize_keyboard=True,
-        input_field_placeholder="Elige el resultado que quieres recibir",
-    )
+OUTPUT_MODE_BUTTON_TEXT = {
+    "transcription": "Solo transcripción",
+    "summary": "Solo resumen",
+    "both": "Transcripción y resumen",
+}
 
 
 def _output_mode(context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -71,6 +67,25 @@ def _output_mode(context: ContextTypes.DEFAULT_TYPE) -> str:
     if mode in OUTPUT_MODE_LABELS:
         return mode
     return "both" if context.user_data.get("summary_enabled", True) else "transcription"
+
+
+def _mode_inline_keyboard(current_mode: str) -> InlineKeyboardMarkup:
+    """Construye botones en línea marcando con ✅ el modo activo."""
+    rows = []
+    for mode in ("transcription", "summary", "both"):
+        text = OUTPUT_MODE_BUTTON_TEXT[mode]
+        if mode == current_mode:
+            text = f"✅ {text}"
+        rows.append([InlineKeyboardButton(text, callback_data=f"mode:{mode}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _mode_selection_text(current_mode: str) -> str:
+    """Texto que acompaña a los botones, indicando el modo activo."""
+    return (
+        "Elige el resultado que quieres recibir para tus próximos audios.\n"
+        f"Modo actual: *{OUTPUT_MODE_LABELS[current_mode]}*."
+    )
 
 
 def _retry_backoff_total(retries: int) -> float:
@@ -113,15 +128,16 @@ def _estimate_summary_timeout() -> float:
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler del comando /start."""
     context.user_data.setdefault("output_mode", "both")
+    current_mode = _output_mode(context)
     await update.message.reply_text(
         "🎙️ **Bot de Transcripción de Audios**\n\n"
         "Envía una nota de voz o archivo de audio y recibirás la transcripción.\n\n"
-        "Elige abajo si quieres transcripción, resumen o ambos.\n\n"
+        f"{_mode_selection_text(current_mode)}\n\n"
         "Comandos:\n"
         "  /modo — Cambiar el resultado que quieres recibir\n"
         "  /ayuda — Ver ayuda",
         parse_mode="Markdown",
-        reply_markup=_mode_keyboard(),
+        reply_markup=_mode_inline_keyboard(current_mode),
     )
 
 
@@ -145,28 +161,37 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_modo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Muestra el selector de resultado del audio."""
+    """Muestra el selector de resultado del audio con el modo activo marcado."""
+    current_mode = _output_mode(context)
     await update.message.reply_text(
-        "Elige el resultado que quieres recibir para tus próximos audios.",
-        reply_markup=_mode_keyboard(),
+        _mode_selection_text(current_mode),
+        parse_mode="Markdown",
+        reply_markup=_mode_inline_keyboard(current_mode),
     )
 
 
-async def handle_mode_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Guarda el modo elegido desde el teclado de Telegram."""
-    message = update.message
-    if not message or not message.text:
+async def handle_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Aplica el modo elegido desde los botones en línea y refresca el mensaje."""
+    query = update.callback_query
+    if not query or not query.data:
         return
 
-    mode = OUTPUT_MODE_BUTTONS.get(message.text)
-    if not mode:
+    mode = query.data.split("mode:", 1)[-1]
+    if mode not in OUTPUT_MODE_LABELS:
+        await query.answer()
         return
 
     context.user_data["output_mode"] = mode
-    await message.reply_text(
-        f"Resultado seleccionado: {OUTPUT_MODE_LABELS[mode]}.",
-        reply_markup=_mode_keyboard(),
-    )
+    await query.answer(f"Modo: {OUTPUT_MODE_LABELS[mode]}")
+
+    try:
+        await query.edit_message_text(
+            _mode_selection_text(mode),
+            parse_mode="Markdown",
+            reply_markup=_mode_inline_keyboard(mode),
+        )
+    except TelegramError:
+        pass
 
 
 # ── Handler de Audio ──────────────────────────────────────────────────────────
