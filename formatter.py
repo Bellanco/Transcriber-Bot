@@ -324,7 +324,7 @@ def _format_summary_from_topics(topics: List[Dict[str, Any]]) -> str:
         f"• {topic}: {summary}"
         for _, _, topic, summary in normalized
     ]
-    return "\n".join(bullets)
+    return "\n\n".join(bullets)
 
 
 def format_summary(text: str) -> str:
@@ -358,7 +358,7 @@ def format_summary(text: str) -> str:
                 bullets.append(f"• Tema: {summary}")
 
     if bullets:
-        return "\n".join(bullets)
+        return "\n\n".join(bullets)
 
     compact = re.sub(r"\s+", " ", text).strip()
     if not compact:

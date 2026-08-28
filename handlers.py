@@ -8,18 +8,16 @@ import math
 from pathlib import Path
 from typing import Optional
 
-from telegram import Update, Message
+from telegram import Update, Message, ReplyKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.error import TelegramError
 
 from config import (
     MAX_FILE_SIZE_MB,
     MAX_FILE_SIZE_BYTES,
-    SUMMARY_MIN_SECONDS,
     LONG_AUDIO_THRESHOLD_SECONDS,
     AUDIO_CHUNK_SECONDS,
     AUDIO_CHUNK_OVERLAP_SECONDS,
-    MAX_SUMMARY_INPUT,
     PROCESSING_CONCURRENCY,
     PROCESSING_TIMEOUT_SECONDS,
     GROQ_TIMEOUT_SECONDS,
@@ -45,6 +43,34 @@ from formatter import stream_text
 logger = logging.getLogger(__name__)
 
 processing_semaphore = asyncio.Semaphore(PROCESSING_CONCURRENCY)
+
+OUTPUT_MODE_BUTTONS = {
+    "Solo transcripción": "transcription",
+    "Solo resumen": "summary",
+    "Transcripción y resumen": "both",
+}
+OUTPUT_MODE_LABELS = {
+    "transcription": "solo transcripción",
+    "summary": "solo resumen",
+    "both": "transcripción y resumen",
+}
+
+
+def _mode_keyboard() -> ReplyKeyboardMarkup:
+    """Construye el teclado persistente para seleccionar el resultado del audio."""
+    return ReplyKeyboardMarkup(
+        [["Solo transcripción", "Solo resumen"], ["Transcripción y resumen"]],
+        resize_keyboard=True,
+        input_field_placeholder="Elige el resultado que quieres recibir",
+    )
+
+
+def _output_mode(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Obtiene el modo de salida, migrando la preferencia anterior si existe."""
+    mode = context.user_data.get("output_mode")
+    if mode in OUTPUT_MODE_LABELS:
+        return mode
+    return "both" if context.user_data.get("summary_enabled", True) else "transcription"
 
 
 def _retry_backoff_total(retries: int) -> float:
@@ -86,15 +112,16 @@ def _estimate_summary_timeout() -> float:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler del comando /start."""
-    context.user_data.setdefault("summary_enabled", True)
+    context.user_data.setdefault("output_mode", "both")
     await update.message.reply_text(
         "🎙️ **Bot de Transcripción de Audios**\n\n"
         "Envía una nota de voz o archivo de audio y recibirás la transcripción.\n\n"
-        "Si el audio supera los 40 segundos, también recibirás un resumen.\n\n"
+        "Elige abajo si quieres transcripción, resumen o ambos.\n\n"
         "Comandos:\n"
-        "  /modo — Activar/desactivar resúmenes automáticos\n"
+        "  /modo — Cambiar el resultado que quieres recibir\n"
         "  /ayuda — Ver ayuda",
         parse_mode="Markdown",
+        reply_markup=_mode_keyboard(),
     )
 
 
@@ -102,7 +129,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler del comando /ayuda o /help."""
     msg = (
         "📖 **Comandos Disponibles**\n\n"
-        "  **/modo** — Activar o desactivar resúmenes automáticos\n"
+        "  **/modo** — Elegir transcripción, resumen o ambos\n"
         "  **/ayuda** — Esta ayuda\n\n"
         "**Formatos aceptados:**\n"
         "  • Notas de voz 🎙️\n"
@@ -112,17 +139,34 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "**Procesamiento:**\n"
         "  • Audios cortos: transcripción instantánea\n"
         "  • Audios largos (> 6 min): procesamiento automático en trozos\n"
-        "  • Resúmenes: disponibles para audios > 40 segundos"
+        "  • Resúmenes: según el modo seleccionado"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
 
 async def cmd_modo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler del comando /modo para alternar resúmenes."""
-    current = context.user_data.get("summary_enabled", True)
-    context.user_data["summary_enabled"] = not current
-    state = "✅ activados" if context.user_data["summary_enabled"] else "❌ desactivados"
-    await update.message.reply_text(f"Resúmenes {state}.")
+    """Muestra el selector de resultado del audio."""
+    await update.message.reply_text(
+        "Elige el resultado que quieres recibir para tus próximos audios.",
+        reply_markup=_mode_keyboard(),
+    )
+
+
+async def handle_mode_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Guarda el modo elegido desde el teclado de Telegram."""
+    message = update.message
+    if not message or not message.text:
+        return
+
+    mode = OUTPUT_MODE_BUTTONS.get(message.text)
+    if not mode:
+        return
+
+    context.user_data["output_mode"] = mode
+    await message.reply_text(
+        f"Resultado seleccionado: {OUTPUT_MODE_LABELS[mode]}.",
+        reply_markup=_mode_keyboard(),
+    )
 
 
 # ── Handler de Audio ──────────────────────────────────────────────────────────
@@ -240,15 +284,20 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 await safe_edit(status_msg, "❌ No se detectó voz en el audio.")
                 return
 
-            # Eliminar mensaje de estado y mostrar transcripción
+            output_mode = _output_mode(context)
+
+            # Eliminar mensaje de estado y mostrar transcripción si corresponde.
             await safe_delete(status_msg)
             status_msg = None
 
-            last_msg = await stream_text(message, formatted)
+            last_msg: Message = message
+            if output_mode in ("transcription", "both"):
+                streamed_message = await stream_text(message, formatted)
+                if streamed_message:
+                    last_msg = streamed_message
 
-            # Resumen (si está habilitado y el audio es suficientemente largo)
-            summary_enabled = context.user_data.get("summary_enabled", True)
-            if summary_enabled and duration >= SUMMARY_MIN_SECONDS:
+            # Generar resumen cuando el modo seleccionado lo requiere.
+            if output_mode in ("summary", "both"):
                 summary_status = await last_msg.reply_text(
                     "🤖 Preparando resumen...",
                 )
@@ -256,7 +305,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 try:
                     summary_timeout = _estimate_summary_timeout()
                     summary = await asyncio.wait_for(
-                        summarize(plain[: MAX_SUMMARY_INPUT]),
+                        summarize(formatted),
                         timeout=summary_timeout,
                     )
                     await summary_status.edit_text(

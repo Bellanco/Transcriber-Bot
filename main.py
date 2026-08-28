@@ -29,6 +29,7 @@ from handlers import (
     cmd_start,
     cmd_help,
     cmd_modo,
+    handle_mode_selection,
     handle_audio,
     handle_text,
     error_handler,
@@ -120,6 +121,12 @@ def main() -> None:
     app.add_handler(CommandHandler("ayuda", cmd_help))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("modo", cmd_modo))
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(r"^(Solo transcripción|Solo resumen|Transcripción y resumen)$"),
+            handle_mode_selection,
+        )
+    )
 
     # Registrar handlers de mensajes
     app.add_handler(
