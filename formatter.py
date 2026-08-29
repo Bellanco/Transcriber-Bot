@@ -205,12 +205,16 @@ async def stream_text(message: "Message", text: str) -> Optional["Message"]:  # 
     if not paragraphs:
         return await message.reply_text(text or "—")
 
-    sent = await message.reply_text(paragraphs[0])
-    accumulated = paragraphs[0]
+    chunks: List[str] = []
+    for paragraph in paragraphs:
+        chunks.extend(split_text(paragraph) or [paragraph])
+
+    sent = await message.reply_text(chunks[0])
+    accumulated = chunks[0]
 
     from config import STREAM_DELAY
 
-    for paragraph in paragraphs[1:]:
+    for paragraph in chunks[1:]:
         await asyncio.sleep(STREAM_DELAY)
         candidate = accumulated + "\n\n" + paragraph
 

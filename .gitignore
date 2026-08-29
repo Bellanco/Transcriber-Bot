@@ -6,6 +6,7 @@
 __pycache__/
 *.py[cod]
 *.pyo
+bot_data.pkl
 
 # Entornos virtuales
 venv/

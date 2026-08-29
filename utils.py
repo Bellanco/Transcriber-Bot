@@ -2,6 +2,7 @@
 
 import os
 import logging
+import re
 from typing import Optional, Tuple
 from urllib.parse import urlparse
 
@@ -52,12 +53,19 @@ def validate_env_vars() -> Tuple[bool, str]:
         (es_válido, mensaje)
     """
     missing = []
-    for var in ("TELEGRAM_TOKEN", "GROQ_API_KEY", "WEBHOOK_URL"):
+    for var in ("TELEGRAM_TOKEN", "GROQ_API_KEY", "WEBHOOK_URL", "WEBHOOK_SECRET"):
         if not os.environ.get(var):
             missing.append(var)
 
     if missing:
         return False, f"❌ Faltan variables de entorno obligatorias: {', '.join(missing)}"
+
+    webhook_secret = os.environ["WEBHOOK_SECRET"]
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", webhook_secret):
+        return False, (
+            "❌ WEBHOOK_SECRET debe tener entre 1 y 256 caracteres: "
+            "letras, números, guion o guion bajo."
+        )
 
     return True, "✅ Variables de entorno validadas."
 

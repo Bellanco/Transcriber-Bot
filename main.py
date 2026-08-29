@@ -2,12 +2,14 @@
 
 import logging
 import sys
+from pathlib import Path
 
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
+    PicklePersistence,
     filters,
 )
 
@@ -44,6 +46,8 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+PERSISTENCE_FILE = Path(__file__).with_name("bot_data.pkl")
 
 
 async def validate_startup() -> bool:
@@ -99,7 +103,12 @@ def main() -> None:
         sys.exit(1)
 
     # Crear aplicación
-    app_builder = Application.builder().token(TELEGRAM_TOKEN)
+    persistence = PicklePersistence(filepath=PERSISTENCE_FILE)
+    app_builder = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .persistence(persistence)
+    )
 
     # Configurar modo local si está habilitado
     if TELEGRAM_LOCAL_MODE:

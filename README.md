@@ -9,7 +9,7 @@
 
 Bot de Telegram que:
 - 🎙️ Transcribe notas de voz, audios y video notas
-- 🤖 Genera resúmenes automáticos con IA (Groq llama-3.3-70b)
+- 🤖 Genera resúmenes automáticos con IA (Groq, modelo configurable)
 - ⚡ Procesa audios largos dividiéndolos en chunks con ffmpeg
 - ✨ Valida API y archivos al iniciar
 - 📱 UX mejorada con mensajes informativos
@@ -18,8 +18,8 @@ Bot de Telegram que:
 
 ## 📋 Requisitos
 
-- **Python 3.8+**
-- **ffmpeg** (opcional, para audios > 20 min)
+- **Python 3.10+**
+- **ffmpeg** (requerido para audios > 6 min)
 - **Cuentas:**
   - Telegram: Token de [@BotFather](https://t.me/botfather)
   - Groq: Clave API en [console.groq.com](https://console.groq.com)
@@ -115,7 +115,7 @@ Ver `.env.example` para template.
 /start          Mensaje de bienvenida y guía rápida
 /ayuda          Ayuda completa + formatos soportados
 /help           Alias de /ayuda
-/modo           Activar/desactivar resúmenes automáticos
+/modo           Elegir transcripción, resumen o ambos
 ```
 
 ---
@@ -141,7 +141,7 @@ Descargar archivo
         ↓
 Validar descarga (existe + no vacío)
         ↓
-¿Audio > 20 min? ┐
+¿Audio > 6 min?  ┐
                  ├→ Sí: Dividir en chunks con ffmpeg
                  └→ No: Transcribir directamente
         ↓
@@ -151,8 +151,8 @@ Formatear párrafos (pausas + puntuación)
         ↓
 Enviar transcripción (streaming párrafo a párrafo)
         ↓
-¿Audio > 40s? + ¿Resúmenes habilitados?
-        ├→ Sí: Generar resumen con llama
+¿El modo incluye resumen?
+        ├→ Sí: Generar resumen con el modelo configurado
         └→ No: Fin
 ```
 

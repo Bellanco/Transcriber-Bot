@@ -122,7 +122,7 @@ async def _transcribe_with_retry(
     raise RuntimeError("Fallo inesperado al transcribir")
 
 
-def _build_audio_chunks_with_ffmpeg(
+async def _build_audio_chunks_with_ffmpeg(
     file_path: str, duration_seconds: int
 ) -> Tuple[List[Tuple[str, float]], str]:
     """
@@ -170,7 +170,13 @@ def _build_audio_chunks_with_ffmpeg(
             chunk_path,
         ]
 
-        proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         if proc.returncode != 0:
             raise RuntimeError(
                 f"ffmpeg falló al crear chunks: {proc.stderr.strip() or 'error desconocido'}"
@@ -217,7 +223,7 @@ async def transcribe_long_audio(
     Returns:
         (texto_plano, texto_con_párrafos)
     """
-    chunks, chunk_dir = _build_audio_chunks_with_ffmpeg(file_path, duration)
+    chunks, chunk_dir = await _build_audio_chunks_with_ffmpeg(file_path, duration)
     total_chunks = len(chunks)
     logger.info("Audio largo detectado: %ss, %s chunks", duration, total_chunks)
 

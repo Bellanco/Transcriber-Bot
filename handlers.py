@@ -55,9 +55,9 @@ OUTPUT_MODE_LABELS = {
     "both": "transcripción y resumen",
 }
 OUTPUT_MODE_BUTTON_TEXT = {
-    "transcription": "Solo transcripción",
-    "summary": "Solo resumen",
-    "both": "Transcripción y resumen",
+    "transcription": "Transcripción",
+    "summary": "Resumen",
+    "both": "Transcripción + resumen",
 }
 
 
@@ -71,21 +71,18 @@ def _output_mode(context: ContextTypes.DEFAULT_TYPE) -> str:
 
 def _mode_inline_keyboard(current_mode: str) -> InlineKeyboardMarkup:
     """Construye botones en línea marcando con ✅ el modo activo."""
-    rows = []
+    buttons = []
     for mode in ("transcription", "summary", "both"):
         text = OUTPUT_MODE_BUTTON_TEXT[mode]
         if mode == current_mode:
             text = f"✅ {text}"
-        rows.append([InlineKeyboardButton(text, callback_data=f"mode:{mode}")])
-    return InlineKeyboardMarkup(rows)
+        buttons.append(InlineKeyboardButton(text, callback_data=f"mode:{mode}"))
+    return InlineKeyboardMarkup([buttons[:2], buttons[2:]])
 
 
 def _mode_selection_text(current_mode: str) -> str:
-    """Texto que acompaña a los botones, indicando el modo activo."""
-    return (
-        "Elige el resultado que quieres recibir para tus próximos audios.\n"
-        f"Modo actual: *{OUTPUT_MODE_LABELS[current_mode]}*."
-    )
+    """Texto breve que acompaña al selector de modo."""
+    return "Resultado para los próximos audios:"
 
 
 def _retry_backoff_total(retries: int) -> float:
@@ -205,20 +202,20 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     # Determinar tipo de audio y extraer metadata
     if message.voice:
-        tg_file = await context.bot.get_file(message.voice.file_id)
+        file_id = message.voice.file_id
         ext = "ogg"
         duration = message.voice.duration or 0
         size = message.voice.file_size or 0
         audio_type = "🎙️ Nota de voz"
     elif message.audio:
-        tg_file = await context.bot.get_file(message.audio.file_id)
+        file_id = message.audio.file_id
         filename = message.audio.file_name or ""
         ext = Path(filename).suffix.lstrip(".").lower() or "mp3"
         duration = message.audio.duration or 0
         size = message.audio.file_size or 0
         audio_type = "🎵 Audio"
     elif message.video_note:
-        tg_file = await context.bot.get_file(message.video_note.file_id)
+        file_id = message.video_note.file_id
         ext = "mp4"
         duration = message.video_note.duration or 0
         size = message.video_note.file_size or 0
@@ -227,12 +224,21 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     # Validar tamaño
+    if size <= 0:
+        await message.reply_text(
+            "❌ No se pudo validar el tamaño del archivo.\n"
+            "Inténtalo de nuevo con un audio válido."
+        )
+        return
+
     if size > MAX_FILE_SIZE_BYTES:
         await message.reply_text(
             f"❌ El archivo supera el límite de {MAX_FILE_SIZE_MB} MB.\n\n"
             f"Tamaño actual: {size / (1024 * 1024):.1f} MB"
         )
         return
+
+    tg_file = await context.bot.get_file(file_id)
 
     # Crear mensaje de estado
     duration_str = format_seconds(duration)
@@ -341,15 +347,15 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                     logger.error("Timeout al generar resumen")
                     await safe_delete(summary_status)
                     await last_msg.reply_text(
-                        "⚠️ No se pudo generar el resumen porque la solicitud tardó demasiado.\n"
-                        "La transcripción está arriba."
+                        "⚠️ No se pudo generar el resumen porque la solicitud tardó demasiado."
+                        + ("\nLa transcripción está arriba." if output_mode == "both" else "")
                     )
                 except Exception as e:
                     logger.error("Error al generar resumen: %s", e)
                     await safe_delete(summary_status)
                     await last_msg.reply_text(
-                        "⚠️ No se pudo generar el resumen por un error del servicio.\n"
-                        "La transcripción está arriba."
+                        "⚠️ No se pudo generar el resumen por un error del servicio."
+                        + ("\nLa transcripción está arriba." if output_mode == "both" else "")
                     )
 
     except Exception as e:
@@ -383,7 +389,8 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         else:
             await safe_edit(
                 status_msg,
-                f"❌ Error inesperado:\n`{error_msg[:100]}`",
+                "❌ Ocurrió un error al procesar el audio.\n"
+                "Inténtalo de nuevo más tarde.",
             )
 
     finally:
