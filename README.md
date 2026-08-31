@@ -118,6 +118,10 @@ Ver `.env.example` para template.
 /modo           Elegir transcripción, resumen o ambos
 ```
 
+Al reenviar uno o varios audios, el bot muestra un selector antes de iniciar el
+procesamiento. La opción elegida se aplica a todos los reenvíos pendientes y
+queda guardada para los audios enviados normalmente.
+
 ---
 
 ## 📤 Entrada Soportada

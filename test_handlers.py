@@ -56,10 +56,63 @@ def make_context() -> SimpleNamespace:
     return SimpleNamespace(
         bot=SimpleNamespace(get_file=AsyncMock(return_value=FakeTelegramFile())),
         user_data={"output_mode": "transcription"},
+        application=SimpleNamespace(update_persistence=AsyncMock()),
     )
 
 
 class HandleAudioTests(unittest.IsolatedAsyncioTestCase):
+    async def test_mode_selection_persists_immediately(self) -> None:
+        query = SimpleNamespace(
+            data="mode:summary",
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+        )
+        context = make_context()
+
+        await handlers.handle_mode_callback(SimpleNamespace(callback_query=query), context)
+
+        self.assertEqual(context.user_data["output_mode"], "summary")
+        context.application.update_persistence.assert_awaited_once()
+        query.edit_message_text.assert_awaited_once()
+
+    async def test_queues_forwarded_audio_until_mode_is_selected(self) -> None:
+        message = FakeIncomingMessage(size=1024, duration=10)
+        message.forward_origin = SimpleNamespace()
+        context = make_context()
+
+        await handlers.handle_audio(SimpleNamespace(message=message), context)
+
+        self.assertEqual(len(context.user_data["pending_forwarded_audios"]), 1)
+        self.assertIn("Elige el resultado", message.texts[0])
+        context.bot.get_file.assert_not_awaited()
+
+    async def test_selected_forwarded_batch_is_removed_before_processing(self) -> None:
+        message = FakeIncomingMessage(size=1024, duration=10)
+        query = SimpleNamespace(
+            data="batch_mode:summary",
+            answer=AsyncMock(),
+            edit_message_text=AsyncMock(),
+            message=message,
+        )
+        context = make_context()
+        audio_data = {
+            "file_id": "file-id",
+            "ext": "ogg",
+            "duration": 10,
+            "size": 1024,
+            "audio_type": "🎙️ Nota de voz",
+        }
+        context.user_data["pending_forwarded_audios"] = [audio_data]
+
+        with patch("handlers._process_audio", new=AsyncMock()) as process_audio:
+            await handlers.handle_mode_callback(
+                SimpleNamespace(callback_query=query), context
+            )
+
+        self.assertNotIn("pending_forwarded_audios", context.user_data)
+        context.application.update_persistence.assert_awaited_once()
+        process_audio.assert_awaited_once_with(audio_data, message, context)
+
     async def test_rejects_unknown_file_size(self) -> None:
         message = FakeIncomingMessage(size=0, duration=10)
         context = make_context()

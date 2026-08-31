@@ -69,14 +69,18 @@ def _output_mode(context: ContextTypes.DEFAULT_TYPE) -> str:
     return "both" if context.user_data.get("summary_enabled", True) else "transcription"
 
 
-def _mode_inline_keyboard(current_mode: str) -> InlineKeyboardMarkup:
+def _mode_inline_keyboard(
+    current_mode: str, callback_prefix: str = "mode"
+) -> InlineKeyboardMarkup:
     """Construye botones en línea marcando con ✅ el modo activo."""
     buttons = []
     for mode in ("transcription", "summary", "both"):
         text = OUTPUT_MODE_BUTTON_TEXT[mode]
         if mode == current_mode:
             text = f"✅ {text}"
-        buttons.append(InlineKeyboardButton(text, callback_data=f"mode:{mode}"))
+        buttons.append(
+            InlineKeyboardButton(text, callback_data=f"{callback_prefix}:{mode}")
+        )
     return InlineKeyboardMarkup([buttons[:2], buttons[2:]])
 
 
@@ -173,12 +177,34 @@ async def handle_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     if not query or not query.data:
         return
 
-    mode = query.data.split("mode:", 1)[-1]
+    callback_prefix, _, mode = query.data.partition(":")
     if mode not in OUTPUT_MODE_LABELS:
         await query.answer()
         return
 
     context.user_data["output_mode"] = mode
+
+    if callback_prefix == "batch_mode":
+        pending_audios = context.user_data.pop("pending_forwarded_audios", [])
+        await context.application.update_persistence()
+        await query.answer(f"Modo: {OUTPUT_MODE_LABELS[mode]}")
+        if not pending_audios:
+            await query.edit_message_text("No hay audios reenviados pendientes.")
+            return
+
+        audio_count = len(pending_audios)
+        audio_label = "audio" if audio_count == 1 else "audios"
+        await query.edit_message_text(
+            f"Procesando {audio_count} {audio_label} con: {OUTPUT_MODE_LABELS[mode]}."
+        )
+        if not query.message:
+            return
+
+        for audio_data in pending_audios:
+            await _process_audio(audio_data, query.message, context)
+        return
+
+    await context.application.update_persistence()
     await query.answer(f"Modo: {OUTPUT_MODE_LABELS[mode]}")
 
     try:
@@ -194,34 +220,69 @@ async def handle_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 # ── Handler de Audio ──────────────────────────────────────────────────────────
 
 
+def _audio_data(message: Message) -> Optional[dict[str, object]]:
+    """Extrae datos persistibles de un mensaje de audio."""
+    if message.voice:
+        return {
+            "file_id": message.voice.file_id,
+            "ext": "ogg",
+            "duration": message.voice.duration or 0,
+            "size": message.voice.file_size or 0,
+            "audio_type": "🎙️ Nota de voz",
+        }
+    elif message.audio:
+        filename = message.audio.file_name or ""
+        return {
+            "file_id": message.audio.file_id,
+            "ext": Path(filename).suffix.lstrip(".").lower() or "mp3",
+            "duration": message.audio.duration or 0,
+            "size": message.audio.file_size or 0,
+            "audio_type": "🎵 Audio",
+        }
+    elif message.video_note:
+        return {
+            "file_id": message.video_note.file_id,
+            "ext": "mp4",
+            "duration": message.video_note.duration or 0,
+            "size": message.video_note.file_size or 0,
+            "audio_type": "🎬 Video Nota",
+        }
+    return None
+
+
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handler principal para audios (voces, audios, video notas)."""
+    """Procesa audios normales y pide modo antes de procesar reenvíos."""
     message = update.message
     if not message:
         return
 
-    # Determinar tipo de audio y extraer metadata
-    if message.voice:
-        file_id = message.voice.file_id
-        ext = "ogg"
-        duration = message.voice.duration or 0
-        size = message.voice.file_size or 0
-        audio_type = "🎙️ Nota de voz"
-    elif message.audio:
-        file_id = message.audio.file_id
-        filename = message.audio.file_name or ""
-        ext = Path(filename).suffix.lstrip(".").lower() or "mp3"
-        duration = message.audio.duration or 0
-        size = message.audio.file_size or 0
-        audio_type = "🎵 Audio"
-    elif message.video_note:
-        file_id = message.video_note.file_id
-        ext = "mp4"
-        duration = message.video_note.duration or 0
-        size = message.video_note.file_size or 0
-        audio_type = "🎬 Video Nota"
-    else:
+    audio_data = _audio_data(message)
+    if not audio_data:
         return
+
+    if getattr(message, "forward_origin", None):
+        pending_audios = context.user_data.setdefault("pending_forwarded_audios", [])
+        pending_audios.append(audio_data)
+        if len(pending_audios) == 1:
+            current_mode = _output_mode(context)
+            await message.reply_text(
+                "Elige el resultado para los audios reenviados:",
+                reply_markup=_mode_inline_keyboard(current_mode, "batch_mode"),
+            )
+        return
+
+    await _process_audio(audio_data, message, context)
+
+
+async def _process_audio(
+    audio_data: dict[str, object], message: Message, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Procesa un audio cuyos datos ya han sido extraídos del mensaje."""
+    file_id = str(audio_data["file_id"])
+    ext = str(audio_data["ext"])
+    duration = int(audio_data["duration"])
+    size = int(audio_data["size"])
+    audio_type = str(audio_data["audio_type"])
 
     # Validar tamaño
     if size <= 0:

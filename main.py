@@ -131,7 +131,7 @@ def main() -> None:
     app.add_handler(CommandHandler("ayuda", cmd_help))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("modo", cmd_modo))
-    app.add_handler(CallbackQueryHandler(handle_mode_callback, pattern=r"^mode:"))
+    app.add_handler(CallbackQueryHandler(handle_mode_callback, pattern=r"^(mode|batch_mode):"))
 
     # Registrar handlers de mensajes
     app.add_handler(
