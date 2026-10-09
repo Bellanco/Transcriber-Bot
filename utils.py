@@ -109,14 +109,15 @@ async def safe_edit(msg: Optional[Message], text: str) -> None:
         pass
 
 
-async def safe_delete(msg: Optional[Message]) -> None:
+async def safe_delete(msg: Optional[Message]) -> bool:
     """Elimina un mensaje de forma segura (ignora errores si no puede)."""
     if not msg:
-        return
+        return False
     try:
         await msg.delete()
+        return True
     except TelegramError:
-        pass
+        return False
 
 
 # ── Validación de archivos ───────────────────────────────────────────────────

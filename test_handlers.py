@@ -62,7 +62,10 @@ def make_context() -> SimpleNamespace:
             delete_message=AsyncMock(),
         ),
         user_data={"output_mode": "transcription"},
-        application=SimpleNamespace(update_persistence=AsyncMock()),
+        application=SimpleNamespace(
+            bot_data={},
+            update_persistence=AsyncMock(),
+        ),
     )
 
 
@@ -98,6 +101,21 @@ class HandleAudioTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("Elige el resultado", message.texts[0])
         context.bot.get_file.assert_not_awaited()
+
+    async def test_forwarded_audio_selector_uses_retention_reply(self) -> None:
+        message = FakeIncomingMessage(size=1024, duration=10)
+        message.forward_origin = SimpleNamespace()
+        context = make_context()
+        selector_message = SimpleNamespace(chat_id=456, message_id=789)
+
+        with patch(
+            "handlers._reply_with_retention", new=AsyncMock(return_value=selector_message)
+        ) as reply_with_retention:
+            await handlers.handle_audio(SimpleNamespace(message=message), context)
+
+        reply_with_retention.assert_awaited_once()
+        self.assertIs(reply_with_retention.await_args.args[0], message)
+        self.assertIs(reply_with_retention.await_args.args[1], context)
 
     async def test_selected_forwarded_batch_is_removed_before_processing(self) -> None:
         message = FakeIncomingMessage(size=1024, duration=10)

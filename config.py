@@ -36,6 +36,8 @@ MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 MAX_TELEGRAM_LENGTH = 4096  # Límite de Telegram por mensaje
 MAX_SUMMARY_INPUT = 12000  # Caracteres máximos para resumir
 PROCESSING_CONCURRENCY = 2  # Audios simultáneos permitidos
+DATA_RETENTION_SECONDS = 24 * 60 * 60
+DATA_RETENTION_SWEEP_SECONDS = 60
 
 # ── Audio largo: chunking ─────────────────────────────────────────────────────
 

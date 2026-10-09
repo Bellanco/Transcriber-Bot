@@ -5,6 +5,7 @@ import tempfile
 import logging
 import asyncio
 import math
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -30,6 +31,12 @@ from config import (
     RETRY_BASE_SECONDS,
     SUMMARY_TIMEOUT_SECONDS,
     SUMMARY_MAX_RETRIES,
+)
+from retention import (
+    mark_user_activity,
+    reply_with_retention,
+    track_message,
+    untrack_message,
 )
 from utils import (
     safe_edit,
@@ -59,6 +66,17 @@ OUTPUT_MODE_BUTTON_TEXT = {
     "summary": "Resumen",
     "both": "Transcripción + resumen",
 }
+
+
+async def _reply_with_retention(
+    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    **kwargs: object,
+) -> Message:
+    return await reply_with_retention(
+        message, context.application, context.user_data, text, **kwargs
+    )
 
 
 def _output_mode(context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -130,7 +148,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler del comando /start."""
     context.user_data.setdefault("output_mode", "both")
     current_mode = _output_mode(context)
-    await update.message.reply_text(
+    await _reply_with_retention(
+        update.message,
+        context,
         "**Bot de Transcripción de Audios**\n\n"
         "Envía una nota de voz o archivo de audio y recibirás la transcripción.\n\n"
         f"{_mode_selection_text(current_mode)}\n\n"
@@ -158,13 +178,17 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  • Audios largos (> 6 min): procesamiento automático en trozos\n"
         "  • Resúmenes: según el modo seleccionado"
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await _reply_with_retention(
+        update.message, context, msg, parse_mode="Markdown"
+    )
 
 
 async def cmd_modo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Muestra el selector de resultado del audio con el modo activo marcado."""
     current_mode = _output_mode(context)
-    await update.message.reply_text(
+    await _reply_with_retention(
+        update.message,
+        context,
         _mode_selection_text(current_mode),
         parse_mode="Markdown",
         reply_markup=_mode_inline_keyboard(current_mode),
@@ -177,6 +201,7 @@ async def handle_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     if not query or not query.data:
         return
 
+    mark_user_activity(context.user_data)
     callback_prefix, _, mode = query.data.partition(":")
     if mode not in OUTPUT_MODE_LABELS:
         await query.answer()
@@ -204,7 +229,8 @@ async def handle_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             for audio_data in pending_audios:
                 await _process_audio(audio_data, query.message, context)
         finally:
-            await safe_delete(query.message)
+            if await safe_delete(query.message):
+                await untrack_message(context.application, query.message)
         return
 
     await context.application.update_persistence()
@@ -289,13 +315,17 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not message:
         return
 
+    mark_user_activity(context.user_data)
     audio_data = _audio_data(message)
     if not audio_data:
         return
 
+    await track_message(context.application, message)
+
     if getattr(message, "forward_origin", None):
         audio_data["message_id"] = message.message_id
         audio_data["chat_id"] = message.chat_id
+        audio_data["queued_at"] = time.time()
         sender_name = _forwarded_sender_name(message)
         if sender_name:
             audio_data["summary_author"] = sender_name
@@ -303,7 +333,9 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         pending_audios.append(audio_data)
         if len(pending_audios) == 1:
             current_mode = _output_mode(context)
-            await message.reply_text(
+            await _reply_with_retention(
+                message,
+                context,
                 "Elige el resultado para los audios reenviados:",
                 reply_markup=_mode_inline_keyboard(current_mode, "batch_mode"),
             )
@@ -324,14 +356,18 @@ async def _process_audio(
 
     # Validar tamaño
     if size <= 0:
-        await message.reply_text(
+        await _reply_with_retention(
+            message,
+            context,
             "No se pudo validar el tamaño del archivo.\n"
             "Inténtalo de nuevo con un audio válido."
         )
         return
 
     if size > MAX_FILE_SIZE_BYTES:
-        await message.reply_text(
+        await _reply_with_retention(
+            message,
+            context,
             f"El archivo supera el límite de {MAX_FILE_SIZE_MB} MB.\n\n"
             f"Tamaño actual: {size / (1024 * 1024):.1f} MB"
         )
@@ -341,7 +377,9 @@ async def _process_audio(
 
     # Crear mensaje de estado
     duration_str = format_seconds(duration)
-    status_msg = await message.reply_text(
+    status_msg = await _reply_with_retention(
+        message,
+        context,
         f"Procesando tu {audio_type.lower()}...\n"
         f"Duración: {duration_str}"
     )
@@ -417,18 +455,23 @@ async def _process_audio(
             output_mode = _output_mode(context)
 
             # Eliminar mensaje de estado y mostrar transcripción si corresponde.
-            await safe_delete(status_msg)
+            if await safe_delete(status_msg):
+                await untrack_message(context.application, status_msg)
             status_msg = None
 
             last_msg: Message = message
             if output_mode in ("transcription", "both"):
-                streamed_message = await stream_text(message, formatted)
+                streamed_message = await stream_text(
+                    message, formatted, application=context.application
+                )
                 if streamed_message:
                     last_msg = streamed_message
 
             # Generar resumen cuando el modo seleccionado lo requiere.
             if output_mode in ("summary", "both"):
-                summary_status = await last_msg.reply_text("Preparando resumen...")
+                summary_status = await _reply_with_retention(
+                    last_msg, context, "Preparando resumen..."
+                )
 
                 try:
                     summary_timeout = _estimate_summary_timeout()
@@ -445,15 +488,21 @@ async def _process_audio(
                     )
                 except asyncio.TimeoutError:
                     logger.error("Timeout al generar resumen")
-                    await safe_delete(summary_status)
-                    await last_msg.reply_text(
+                    if await safe_delete(summary_status):
+                        await untrack_message(context.application, summary_status)
+                    await _reply_with_retention(
+                        last_msg,
+                        context,
                         "No se pudo generar el resumen porque la solicitud tardó demasiado."
                         + ("\nLa transcripción está arriba." if output_mode == "both" else "")
                     )
                 except Exception as e:
                     logger.error("Error al generar resumen: %s", e)
-                    await safe_delete(summary_status)
-                    await last_msg.reply_text(
+                    if await safe_delete(summary_status):
+                        await untrack_message(context.application, summary_status)
+                    await _reply_with_retention(
+                        last_msg,
+                        context,
                         "No se pudo generar el resumen por un error del servicio."
                         + ("\nLa transcripción está arriba." if output_mode == "both" else "")
                     )
@@ -496,16 +545,25 @@ async def _process_audio(
     finally:
         source_message_id = audio_data.get("message_id")
         source_chat_id = audio_data.get("chat_id")
+        source_deleted = False
         if source_message_id is not None and source_chat_id is not None:
             try:
                 await context.bot.delete_message(
                     chat_id=source_chat_id,
                     message_id=source_message_id,
                 )
+                source_deleted = True
             except TelegramError:
                 pass
         else:
-            await safe_delete(message)
+            source_deleted = await safe_delete(message)
+
+        if source_deleted:
+            await untrack_message(
+                context.application,
+                chat_id=source_chat_id,
+                message_id=source_message_id,
+            )
 
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -513,7 +571,10 @@ async def _process_audio(
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler para mensajes de texto que no son comandos."""
-    await update.message.reply_text(
+    mark_user_activity(context.user_data)
+    await _reply_with_retention(
+        update.message,
+        context,
         "Envía una nota de voz o archivo de audio para transcribirlo.\n\n"
         "Usa /ayuda para ver más información.",
     )

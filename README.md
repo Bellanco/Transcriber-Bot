@@ -122,6 +122,13 @@ Al reenviar uno o varios audios, el bot muestra un selector antes de iniciar el
 procesamiento. La opción elegida se aplica a todos los reenvíos pendientes y
 queda guardada para los audios enviados normalmente.
 
+## Privacidad y retención
+
+- El bot programa el borrado de los audios recibidos y de sus propios mensajes (incluidas las transcripciones, los resúmenes y los selectores) al cumplir 24 horas. Hace una limpieza al iniciar y luego periódicamente; reintenta los borrados que Telegram rechace.
+- Telegram solo permite borrar mensajes de menos de 48 horas. Si el bot permanece detenido hasta superar ese límite, ya no podrá borrarlos; en grupos también necesita permisos para borrar mensajes de otras personas. Por eso las 24 horas son un objetivo, no una garantía de borrado remoto.
+- Las preferencias y los reenvíos pendientes se eliminan del estado local tras un día sin actividad. Los archivos temporales de procesamiento se eliminan al terminar el procesamiento.
+- Esta función no puede borrar copias guardadas o reenviadas por otras personas ni controlar cuánto tiempo conservan los datos Telegram, Groq o el servicio de alojamiento. Tampoco registra mensajes anteriores a su despliegue.
+
 ---
 
 ## 📤 Entrada Soportada

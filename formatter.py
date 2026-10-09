@@ -192,7 +192,9 @@ def parse_transcription_result(
 # ── Partición de mensajes largos ──────────────────────────────────────────────
 
 
-async def stream_text(message: "Message", text: str) -> Optional["Message"]:  # type: ignore
+async def stream_text(
+    message: "Message", text: str, application: Any = None
+) -> Optional["Message"]:  # type: ignore
     """
     Revela el texto párrafo a párrafo editando el mismo mensaje.
     Si el mensaje acumulado supera el límite de Telegram, abre uno nuevo.
@@ -200,16 +202,23 @@ async def stream_text(message: "Message", text: str) -> Optional["Message"]:  # 
     """
     import asyncio
     from telegram.error import BadRequest, TelegramError
+    from retention import track_message
+
+    async def _reply(text: str) -> "Message":
+        sent_message = await message.reply_text(text)
+        if application is not None:
+            await track_message(application, sent_message)
+        return sent_message
 
     paragraphs = [p for p in text.split("\n\n") if p.strip()]
     if not paragraphs:
-        return await message.reply_text(text or "—")
+        return await _reply(text or "—")
 
     chunks: List[str] = []
     for paragraph in paragraphs:
         chunks.extend(split_text(paragraph) or [paragraph])
 
-    sent = await message.reply_text(chunks[0])
+    sent = await _reply(chunks[0])
     accumulated = chunks[0]
 
     from config import STREAM_DELAY
@@ -220,14 +229,14 @@ async def stream_text(message: "Message", text: str) -> Optional["Message"]:  # 
 
         if len(candidate) > MAX_TELEGRAM_LENGTH:
             # El bloque no cabe: enviar mensaje nuevo
-            sent = await message.reply_text(paragraph)
+            sent = await _reply(paragraph)
             accumulated = paragraph
         else:
             try:
                 await sent.edit_text(candidate)
                 accumulated = candidate
             except BadRequest:
-                sent = await message.reply_text(paragraph)
+                sent = await _reply(paragraph)
                 accumulated = paragraph
             except TelegramError:
                 pass

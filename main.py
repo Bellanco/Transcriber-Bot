@@ -10,6 +10,7 @@ from telegram.ext import (
     CommandHandler,
     MessageHandler,
     PicklePersistence,
+    ContextTypes,
     filters,
 )
 
@@ -22,7 +23,9 @@ from config import (
     TELEGRAM_LOCAL_MODE,
     TELEGRAM_API_BASE_URL,
     TELEGRAM_API_FILE_URL,
+    DATA_RETENTION_SWEEP_SECONDS,
 )
+from retention import cleanup_expired_data
 from utils import (
     validate_env_vars,
     validate_groq_api,
@@ -48,6 +51,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 PERSISTENCE_FILE = Path(__file__).with_name("bot_data.pkl")
+
+
+async def _retention_cleanup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    await cleanup_expired_data(context.application)
+
+
+async def _post_init(application: Application) -> None:
+    await cleanup_expired_data(application)
+    if application.job_queue is None:
+        raise RuntimeError("JobQueue no disponible; no se puede ejecutar la retención automática")
+    application.job_queue.run_repeating(
+        _retention_cleanup_job,
+        interval=DATA_RETENTION_SWEEP_SECONDS,
+        first=DATA_RETENTION_SWEEP_SECONDS,
+        name="retention-cleanup",
+    )
 
 
 async def validate_startup() -> bool:
@@ -106,6 +125,7 @@ def main() -> None:
         Application.builder()
         .token(TELEGRAM_TOKEN)
         .persistence(persistence)
+        .post_init(_post_init)
     )
 
     # Configurar modo local si está habilitado
