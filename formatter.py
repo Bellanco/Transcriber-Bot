@@ -268,7 +268,7 @@ def split_text(text: str, limit: int = MAX_TELEGRAM_LENGTH) -> List[str]:
     return [p for p in parts if p]
 
 
-def _truncate_words(text: str, max_words: int = 22) -> str:
+def _truncate_words(text: str, max_words: int = 32) -> str:
     """Recorta una frase a un máximo de palabras para mantenerla escaneable."""
     words = text.split()
     if len(words) <= max_words:

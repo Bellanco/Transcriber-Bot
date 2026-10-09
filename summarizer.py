@@ -53,7 +53,7 @@ async def _summarize_request(text: str) -> str:
     """Hace una petición de resumen a Groq con timeout explícito."""
     response = await groq_client.chat.completions.create(
         model=SUMMARY_MODEL,
-        max_tokens=500,
+        max_tokens=700,
         temperature=0.2,
         timeout=SUMMARY_TIMEOUT_SECONDS,
         messages=[
@@ -62,32 +62,33 @@ async def _summarize_request(text: str) -> str:
                 "content": (
                     "Eres editor de resúmenes de transcripciones de audio en castellano. Escribe para alguien "
                     "que no escuchó el audio: debe entender las ideas principales y cómo se relacionan, "
-                    "con la menor cantidad de palabras posible.\n\n"
+                    "con los detalles que las matizan y con la menor cantidad de palabras posible.\n\n"
                     "# Selección y fidelidad\n"
                     "Usa solo lo dicho en la transcripción; no inventes ni completes información. Conserva "
                     "los hechos, motivos, decisiones, propuestas, tareas, responsables, fechas y cifras que "
                     "sean importantes para entender qué ocurrió y qué sigue. Distingue lo acordado de lo "
                     "posible o pendiente. Si un dato es ambiguo o parece un error de transcripción, omítelo "
                     "o indícalo con cautela.\n"
-                    "Une detalles repetidos o relacionados en el mismo tema; no hagas un punto por cada "
-                    "intervención. Quita saludos, rodeos y repeticiones que no aporten información. Mantén "
-                    "el orden en que aparecen los temas.\n\n"
+                    "Combina únicamente repeticiones o detalles del mismo asunto. No unas asuntos distintos "
+                    "solo porque pertenezcan a un tema general parecido. Conserva los subtemas con información "
+                    "propia, como planes, plazos, cifras, condiciones, consecuencias o posturas. Quita saludos "
+                    "y repeticiones que no aporten información. Mantén el orden de aparición.\n\n"
                     "# Redacción\n"
                     "Usa lenguaje sencillo, directo y natural. Cada resumen debe ser una frase completa y "
                     "autosuficiente: nombra de quién o de qué se habla y expresa la acción, decisión o "
                     "resultado. Evita referencias vagas como 'eso' o 'lo anterior' si no se entienden por sí "
                     "solas. No añadas explicaciones para alargar: reemplaza frases vagas por datos concretos "
-                    "que sí estén en la fuente. Antes de responder, revisa si falta algún dato central o "
-                    "se repite una idea; mejora la precisión sustituyendo lo redundante o genérico, sin "
-                    "añadir puntos ni aumentar la extensión.\n\n"
+                    "que sí estén en la fuente. Antes de responder, revisa que cada asunto distinto y sus "
+                    "matices importantes sigan presentes; elimina solo redundancias, no información única.\n\n"
                     "# Formato y extensión\n"
                     "Devuelve SOLO JSON válido (sin texto extra) con este esquema exacto:\n"
                     "[\n"
                     '  {"tema":"...","resumen":"...","posicion_inicial":123}\n'
                     "]\n\n"
-                    "- Incluye como máximo 8 temas; combina los relacionados y prioriza decisiones, tareas y "
-                    "resultados. No alargues el resumen para cubrir detalles secundarios.\n"
-                    "- tema es un título breve y concreto; resumen es una sola frase de hasta 22 palabras.\n"
+                    "- Incluye todos los temas distintos que aporten información relevante; no hay un máximo "
+                    "fijo de puntos. No omitas un plan, plazo, cifra, condición, comparación o postura por "
+                    "considerarlo secundario.\n"
+                    "- tema es un título breve y concreto; resumen es una sola frase de hasta 32 palabras.\n"
                     "- posicion_inicial es el índice aproximado, en caracteres, de la primera aparición del tema.\n"
                     "- Sin markdown ni explicaciones fuera del JSON. Responde en castellano, aunque la fuente "
                     "mezcle idiomas.\n"

@@ -53,42 +53,40 @@ PERSISTENCE_FILE = Path(__file__).with_name("bot_data.pkl")
 async def validate_startup() -> bool:
     """Valida que la configuración sea correcta al iniciar."""
     logger.info("=" * 70)
-    logger.info("🚀 Iniciando Bot de Transcripción")
+    logger.info("Iniciando Bot de Transcripción")
     logger.info("=" * 70)
 
     # Validar variables de entorno obligatorias
     is_valid, msg = validate_env_vars()
     logger.info(msg)
     if not is_valid:
-        logger.error("❌ Validación fallida. Abortar.")
+        logger.error("Validación fallida. Abortar.")
         return False
 
     # Validar API de Groq
-    logger.info("🔐 Validando Groq API...")
+    logger.info("Validando Groq API...")
     is_valid, msg = await validate_groq_api(GROQ_API_KEY)
     logger.info(msg)
     if not is_valid:
-        logger.error("❌ Validación fallida. Abortar.")
+        logger.error("Validación fallida. Abortar.")
         return False
 
     # Verificar ffmpeg
     if _ffmpeg_is_available():
-        logger.info("✅ ffmpeg detectado: procesamiento de audios largos habilitado")
+        logger.info("ffmpeg detectado: procesamiento de audios largos habilitado")
     else:
         logger.warning(
-            "⚠️ ffmpeg no detectado: audios largos pueden fallar"
+            "ffmpeg no detectado: audios largos pueden fallar"
         )
 
     # Verificar modo local de Bot API
     if TELEGRAM_LOCAL_MODE:
-        logger.info(
-            "🔗 Modo Bot API local: %s", TELEGRAM_API_BASE_URL
-        )
+        logger.info("Modo Bot API local: %s", TELEGRAM_API_BASE_URL)
     else:
-        logger.info("🔗 Usando Bot API en la nube")
+        logger.info("Usando Bot API en la nube")
 
     logger.info("=" * 70)
-    logger.info("✅ Todas las validaciones pasaron")
+    logger.info("Todas las validaciones pasaron")
     logger.info("=" * 70)
     return True
 
@@ -152,7 +150,7 @@ def main() -> None:
         sys.exit(1)
 
     logger.info("=" * 70)
-    logger.info("🌐 Configuración de Webhook")
+    logger.info("Configuración de Webhook")
     logger.info("=" * 70)
     logger.info("Escuchando en: 0.0.0.0:%d", PORT)
     logger.info("Path: /%s", webhook_path)

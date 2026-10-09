@@ -24,7 +24,7 @@ async def validate_groq_api(api_key: str) -> Tuple[bool, str]:
         (es_válida, mensaje_usuario)
     """
     if not api_key or not api_key.strip():
-        return False, "❌ GROQ_API_KEY está vacío o no configurado."
+        return False, "GROQ_API_KEY está vacío o no configurado."
 
     try:
         client = AsyncGroq(api_key=api_key)
@@ -35,14 +35,14 @@ async def validate_groq_api(api_key: str) -> Tuple[bool, str]:
             messages=[{"role": "user", "content": "hi"}],
             timeout=10,
         )
-        return True, "✅ API de Groq validada correctamente."
+        return True, "API de Groq validada correctamente."
     except APIError as e:
         status_code = getattr(e, "status_code", None)
         if status_code == 401:
-            return False, f"❌ GROQ_API_KEY inválida (error 401 Unauthorized)."
-        return False, f"❌ Error al validar Groq API: {str(e)}"
+            return False, "GROQ_API_KEY inválida (error 401 Unauthorized)."
+        return False, f"Error al validar Groq API: {str(e)}"
     except Exception as e:
-        return False, f"❌ Error inesperado al validar Groq API: {str(e)}"
+        return False, f"Error inesperado al validar Groq API: {str(e)}"
 
 
 def validate_env_vars() -> Tuple[bool, str]:
@@ -58,16 +58,16 @@ def validate_env_vars() -> Tuple[bool, str]:
             missing.append(var)
 
     if missing:
-        return False, f"❌ Faltan variables de entorno obligatorias: {', '.join(missing)}"
+        return False, f"Faltan variables de entorno obligatorias: {', '.join(missing)}"
 
     webhook_secret = os.environ["WEBHOOK_SECRET"]
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", webhook_secret):
         return False, (
-            "❌ WEBHOOK_SECRET debe tener entre 1 y 256 caracteres: "
+            "WEBHOOK_SECRET debe tener entre 1 y 256 caracteres: "
             "letras, números, guion o guion bajo."
         )
 
-    return True, "✅ Variables de entorno validadas."
+    return True, "Variables de entorno validadas."
 
 
 def resolve_webhook_settings() -> Tuple[str, str]:

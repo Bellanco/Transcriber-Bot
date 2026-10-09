@@ -72,12 +72,12 @@ def _output_mode(context: ContextTypes.DEFAULT_TYPE) -> str:
 def _mode_inline_keyboard(
     current_mode: str, callback_prefix: str = "mode"
 ) -> InlineKeyboardMarkup:
-    """Construye botones en línea marcando con ✅ el modo activo."""
+    """Construye botones en línea marcando el modo activo."""
     buttons = []
     for mode in ("transcription", "summary", "both"):
         text = OUTPUT_MODE_BUTTON_TEXT[mode]
         if mode == current_mode:
-            text = f"✅ {text}"
+            text = f"{text} (actual)"
         buttons.append(
             InlineKeyboardButton(text, callback_data=f"{callback_prefix}:{mode}")
         )
@@ -131,7 +131,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.setdefault("output_mode", "both")
     current_mode = _output_mode(context)
     await update.message.reply_text(
-        "🎙️ **Bot de Transcripción de Audios**\n\n"
+        "**Bot de Transcripción de Audios**\n\n"
         "Envía una nota de voz o archivo de audio y recibirás la transcripción.\n\n"
         f"{_mode_selection_text(current_mode)}\n\n"
         "Comandos:\n"
@@ -145,13 +145,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler del comando /ayuda o /help."""
     msg = (
-        "📖 **Comandos Disponibles**\n\n"
+        "**Comandos Disponibles**\n\n"
         "  **/modo** — Elegir transcripción, resumen o ambos\n"
         "  **/ayuda** — Esta ayuda\n\n"
         "**Formatos aceptados:**\n"
-        "  • Notas de voz 🎙️\n"
-        "  • MP3, M4A, WAV, OGG, FLAC 🎵\n"
-        "  • MP4 con audio 🎬\n\n"
+        "  • Notas de voz\n"
+        "  • MP3, M4A, WAV, OGG, FLAC\n"
+        "  • MP4 con audio\n\n"
         f"**Límite de tamaño:** {MAX_FILE_SIZE_MB} MB\n\n"
         "**Procesamiento:**\n"
         "  • Audios cortos: transcripción instantánea\n"
@@ -231,7 +231,7 @@ def _audio_data(message: Message) -> Optional[dict[str, object]]:
             "ext": "ogg",
             "duration": message.voice.duration or 0,
             "size": message.voice.file_size or 0,
-            "audio_type": "🎙️ Nota de voz",
+            "audio_type": "Nota de voz",
         }
     elif message.audio:
         filename = message.audio.file_name or ""
@@ -240,7 +240,7 @@ def _audio_data(message: Message) -> Optional[dict[str, object]]:
             "ext": Path(filename).suffix.lstrip(".").lower() or "mp3",
             "duration": message.audio.duration or 0,
             "size": message.audio.file_size or 0,
-            "audio_type": "🎵 Audio",
+            "audio_type": "Audio",
         }
     elif message.video_note:
         return {
@@ -248,9 +248,39 @@ def _audio_data(message: Message) -> Optional[dict[str, object]]:
             "ext": "mp4",
             "duration": message.video_note.duration or 0,
             "size": message.video_note.file_size or 0,
-            "audio_type": "🎬 Video Nota",
+            "audio_type": "Video Nota",
         }
     return None
+
+
+def _forwarded_sender_name(message: Message) -> Optional[str]:
+    """Obtiene el nombre disponible en el origen de un mensaje reenviado."""
+    origin = message.forward_origin
+    if not origin:
+        return None
+
+    sender_user = getattr(origin, "sender_user", None)
+    if sender_user:
+        name = " ".join(
+            part
+            for part in (
+                getattr(sender_user, "first_name", None),
+                getattr(sender_user, "last_name", None),
+            )
+            if part
+        )
+        return name or getattr(sender_user, "username", None)
+
+    hidden_name = getattr(origin, "sender_user_name", None)
+    if hidden_name:
+        return hidden_name
+
+    author_signature = getattr(origin, "author_signature", None)
+    if author_signature:
+        return author_signature
+
+    origin_chat = getattr(origin, "sender_chat", None) or getattr(origin, "chat", None)
+    return getattr(origin_chat, "title", None)
 
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -266,6 +296,9 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if getattr(message, "forward_origin", None):
         audio_data["message_id"] = message.message_id
         audio_data["chat_id"] = message.chat_id
+        sender_name = _forwarded_sender_name(message)
+        if sender_name:
+            audio_data["summary_author"] = sender_name
         pending_audios = context.user_data.setdefault("pending_forwarded_audios", [])
         pending_audios.append(audio_data)
         if len(pending_audios) == 1:
@@ -292,14 +325,14 @@ async def _process_audio(
     # Validar tamaño
     if size <= 0:
         await message.reply_text(
-            "❌ No se pudo validar el tamaño del archivo.\n"
+            "No se pudo validar el tamaño del archivo.\n"
             "Inténtalo de nuevo con un audio válido."
         )
         return
 
     if size > MAX_FILE_SIZE_BYTES:
         await message.reply_text(
-            f"❌ El archivo supera el límite de {MAX_FILE_SIZE_MB} MB.\n\n"
+            f"El archivo supera el límite de {MAX_FILE_SIZE_MB} MB.\n\n"
             f"Tamaño actual: {size / (1024 * 1024):.1f} MB"
         )
         return
@@ -309,7 +342,7 @@ async def _process_audio(
     # Crear mensaje de estado
     duration_str = format_seconds(duration)
     status_msg = await message.reply_text(
-        f"⏳ Procesando tu {audio_type.lower()}...\n"
+        f"Procesando tu {audio_type.lower()}...\n"
         f"Duración: {duration_str}"
     )
     tmp_path: Optional[str] = None
@@ -317,7 +350,7 @@ async def _process_audio(
     try:
         async with processing_semaphore:
             # Descargar archivo
-            await safe_edit(status_msg, f"📥 Descargando archivo ({size / (1024 * 1024):.1f} MB)...")
+            await safe_edit(status_msg, f"Descargando archivo ({size / (1024 * 1024):.1f} MB)...")
 
             with tempfile.NamedTemporaryFile(
                 suffix=f".{ext}", delete=False
@@ -331,7 +364,7 @@ async def _process_audio(
             if not is_valid:
                 await safe_edit(
                     status_msg,
-                    f"❌ Error al descargar: {error_msg}",
+                    f"Error al descargar: {error_msg}",
                 )
                 return
 
@@ -344,14 +377,14 @@ async def _process_audio(
 
                     await safe_edit(
                         status_msg,
-                        f"🔧 Preparando audio largo ({duration_str})...\n"
+                        f"Preparando audio largo ({duration_str})...\n"
                         "Dividiendo en trozos...",
                     )
                     plain, formatted = await transcribe_long_audio(
                         tmp_path, duration, status_msg=status_msg
                     )
                 else:
-                    await safe_edit(status_msg, "🎙️ Transcribiendo...")
+                    await safe_edit(status_msg, "Transcribiendo...")
                     plain, formatted = await transcribe(tmp_path, status_msg=status_msg)
                 return plain, formatted, None
 
@@ -363,7 +396,7 @@ async def _process_audio(
             except asyncio.TimeoutError:
                 await safe_edit(
                     status_msg,
-                    "⏱️ La transcripción tardó demasiado y se canceló.\n"
+                    "La transcripción tardó demasiado y se canceló.\n"
                     "Prueba con un audio más corto o inténtalo de nuevo.",
                 )
                 return
@@ -371,14 +404,14 @@ async def _process_audio(
             if special == "no_ffmpeg":
                 await safe_edit(
                     status_msg,
-                    f"❌ No se puede procesar audios largos (> {LONG_AUDIO_THRESHOLD_SECONDS // 60} min) ahora.\n"
+                    f"No se puede procesar audios largos (> {LONG_AUDIO_THRESHOLD_SECONDS // 60} min) ahora.\n"
                     "ffmpeg no está disponible en el servidor.",
                 )
                 return
 
             # Validar que se obtuvo transcripción
             if not plain:
-                await safe_edit(status_msg, "❌ No se detectó voz en el audio.")
+                await safe_edit(status_msg, "No se detectó voz en el audio.")
                 return
 
             output_mode = _output_mode(context)
@@ -395,9 +428,7 @@ async def _process_audio(
 
             # Generar resumen cuando el modo seleccionado lo requiere.
             if output_mode in ("summary", "both"):
-                summary_status = await last_msg.reply_text(
-                    "🤖 Preparando resumen...",
-                )
+                summary_status = await last_msg.reply_text("Preparando resumen...")
 
                 try:
                     summary_timeout = _estimate_summary_timeout()
@@ -405,22 +436,25 @@ async def _process_audio(
                         summarize(formatted),
                         timeout=summary_timeout,
                     )
+                    summary_author = str(audio_data.get("summary_author") or "").strip()
+                    summary_title = (
+                        f"Resumen de {summary_author}" if summary_author else "Resumen"
+                    )
                     await summary_status.edit_text(
-                        f"📌 **Resumen:**\n\n{summary}",
-                        parse_mode="Markdown",
+                        f"{summary_title}:\n\n{summary}"
                     )
                 except asyncio.TimeoutError:
                     logger.error("Timeout al generar resumen")
                     await safe_delete(summary_status)
                     await last_msg.reply_text(
-                        "⚠️ No se pudo generar el resumen porque la solicitud tardó demasiado."
+                        "No se pudo generar el resumen porque la solicitud tardó demasiado."
                         + ("\nLa transcripción está arriba." if output_mode == "both" else "")
                     )
                 except Exception as e:
                     logger.error("Error al generar resumen: %s", e)
                     await safe_delete(summary_status)
                     await last_msg.reply_text(
-                        "⚠️ No se pudo generar el resumen por un error del servicio."
+                        "No se pudo generar el resumen por un error del servicio."
                         + ("\nLa transcripción está arriba." if output_mode == "both" else "")
                     )
 
@@ -431,31 +465,31 @@ async def _process_audio(
         if "rate_limit" in error_msg.lower():
             await safe_edit(
                 status_msg,
-                "⏱️ El servicio está saturado.\n"
+                "El servicio está saturado.\n"
                 "Espera unos segundos e inténtalo de nuevo.",
             )
         elif "timeout" in error_msg.lower():
             await safe_edit(
                 status_msg,
-                "⏱️ La transcripción tardó demasiado.\n"
+                "La transcripción tardó demasiado.\n"
                 "Prueba con un audio más corto.",
             )
         elif "unauthorized" in error_msg.lower() or "401" in error_msg.lower():
             await safe_edit(
                 status_msg,
-                "❌ Error de configuración: GROQ_API_KEY inválida.\n"
+                "Error de configuración: GROQ_API_KEY inválida.\n"
                 "Contacta al administrador.",
             )
         elif "ffmpeg" in error_msg.lower():
             await safe_edit(
                 status_msg,
-                "❌ Error procesando audio.\n"
+                "Error procesando audio.\n"
                 "Intenta con un audio más corto.",
             )
         else:
             await safe_edit(
                 status_msg,
-                "❌ Ocurrió un error al procesar el audio.\n"
+                "Ocurrió un error al procesar el audio.\n"
                 "Inténtalo de nuevo más tarde.",
             )
 
@@ -480,7 +514,7 @@ async def _process_audio(
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handler para mensajes de texto que no son comandos."""
     await update.message.reply_text(
-        "👋 Envía una nota de voz o archivo de audio para transcribirlo.\n\n"
+        "Envía una nota de voz o archivo de audio para transcribirlo.\n\n"
         "Usa /ayuda para ver más información.",
     )
 

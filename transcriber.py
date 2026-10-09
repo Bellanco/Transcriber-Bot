@@ -94,7 +94,7 @@ async def _transcribe_with_retry(
             if status_msg:
                 await safe_edit(
                     status_msg,
-                    f"⏳ Reintentando transcripción de {label} "
+                    f"Reintentando transcripción de {label} "
                     f"({attempt}/{TRANSCRIBE_MAX_RETRIES})...",
                 )
             await asyncio.sleep(wait_s)
@@ -112,7 +112,7 @@ async def _transcribe_with_retry(
             if status_msg:
                 await safe_edit(
                     status_msg,
-                    f"⏳ Reintentando transcripción de {label} "
+                    f"Reintentando transcripción de {label} "
                     f"({attempt}/{TRANSCRIBE_MAX_RETRIES})...",
                 )
             await asyncio.sleep(wait_s)
@@ -239,7 +239,7 @@ async def transcribe_long_audio(
             if status_msg:
                 await safe_edit(
                     status_msg,
-                    f"⏳ Transcribiendo audio largo...\n`{idx}/{total_chunks}` trozos",
+                    f"Transcribiendo audio largo...\n`{idx}/{total_chunks}` trozos",
                 )
 
             result = await _transcribe_with_retry(
