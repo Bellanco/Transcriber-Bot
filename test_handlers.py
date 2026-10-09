@@ -16,12 +16,13 @@ class FakeStatusMessage:
 
     def __init__(self) -> None:
         self.texts = []
+        self.deleted = False
 
     async def edit_text(self, text: str) -> None:
         self.texts.append(text)
 
     async def delete(self) -> None:
-        return None
+        self.deleted = True
 
     async def reply_text(self, text: str, **kwargs: object) -> "FakeStatusMessage":
         self.texts.append(text)
@@ -33,6 +34,8 @@ class FakeIncomingMessage(FakeStatusMessage):
 
     def __init__(self, size: int, duration: int) -> None:
         super().__init__()
+        self.message_id = 123
+        self.chat_id = 456
         self.voice = SimpleNamespace(file_id="file-id", file_size=size, duration=duration)
         self.audio = None
         self.video_note = None
@@ -54,7 +57,10 @@ class FakeTelegramFile:
 
 def make_context() -> SimpleNamespace:
     return SimpleNamespace(
-        bot=SimpleNamespace(get_file=AsyncMock(return_value=FakeTelegramFile())),
+        bot=SimpleNamespace(
+            get_file=AsyncMock(return_value=FakeTelegramFile()),
+            delete_message=AsyncMock(),
+        ),
         user_data={"output_mode": "transcription"},
         application=SimpleNamespace(update_persistence=AsyncMock()),
     )
@@ -83,6 +89,7 @@ class HandleAudioTests(unittest.IsolatedAsyncioTestCase):
         await handlers.handle_audio(SimpleNamespace(message=message), context)
 
         self.assertEqual(len(context.user_data["pending_forwarded_audios"]), 1)
+        self.assertEqual(context.user_data["pending_forwarded_audios"][0]["message_id"], 123)
         self.assertIn("Elige el resultado", message.texts[0])
         context.bot.get_file.assert_not_awaited()
 
@@ -112,6 +119,7 @@ class HandleAudioTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("pending_forwarded_audios", context.user_data)
         context.application.update_persistence.assert_awaited_once()
         process_audio.assert_awaited_once_with(audio_data, message, context)
+        self.assertTrue(message.deleted)
 
     async def test_rejects_unknown_file_size(self) -> None:
         message = FakeIncomingMessage(size=0, duration=10)
@@ -140,6 +148,26 @@ class HandleAudioTests(unittest.IsolatedAsyncioTestCase):
                 await handlers.handle_audio(SimpleNamespace(message=message), context)
 
         transcribe.assert_awaited_once()
+        self.assertTrue(message.deleted)
+
+    async def test_deletes_forwarded_audio_after_processing(self) -> None:
+        message = FakeStatusMessage()
+        context = make_context()
+        audio_data = {
+            "file_id": "file-id",
+            "ext": "ogg",
+            "duration": 10,
+            "size": 1024,
+            "audio_type": "Nota de voz",
+            "message_id": 789,
+            "chat_id": 456,
+        }
+
+        with patch("handlers.transcribe", new=AsyncMock(return_value=("texto", "texto"))):
+            with patch("handlers.stream_text", new=AsyncMock(return_value=message)):
+                await handlers._process_audio(audio_data, message, context)
+
+        context.bot.delete_message.assert_awaited_once_with(chat_id=456, message_id=789)
 
     async def test_accepts_file_at_size_limit(self) -> None:
         message = FakeIncomingMessage(size=MAX_FILE_SIZE_BYTES, duration=10)

@@ -138,60 +138,64 @@ async def _build_audio_chunks_with_ffmpeg(
     chunk_dir = tempfile.mkdtemp(prefix="tg_chunks_")
     chunk_paths: List[Tuple[str, float]] = []
 
-    step = max(1, AUDIO_CHUNK_SECONDS - AUDIO_CHUNK_OVERLAP_SECONDS)
-    start = 0.0
-    index = 0
+    try:
+        step = max(1, AUDIO_CHUNK_SECONDS - AUDIO_CHUNK_OVERLAP_SECONDS)
+        start = 0.0
+        index = 0
 
-    while start < duration_seconds:
-        remaining = max(0.0, float(duration_seconds) - start)
-        chunk_len = min(float(AUDIO_CHUNK_SECONDS), remaining)
-        if chunk_len <= 0:
-            break
+        while start < duration_seconds:
+            remaining = max(0.0, float(duration_seconds) - start)
+            chunk_len = min(float(AUDIO_CHUNK_SECONDS), remaining)
+            if chunk_len <= 0:
+                break
 
-        chunk_path = os.path.join(chunk_dir, f"chunk_{index:03d}.flac")
-        cmd = [
-            "ffmpeg",
-            "-v",
-            "error",
-            "-y",
-            "-ss",
-            f"{start:.3f}",
-            "-t",
-            f"{chunk_len:.3f}",
-            "-i",
-            file_path,
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-c:a",
-            "flac",
-            chunk_path,
-        ]
+            chunk_path = os.path.join(chunk_dir, f"chunk_{index:03d}.flac")
+            cmd = [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-y",
+                "-ss",
+                f"{start:.3f}",
+                "-t",
+                f"{chunk_len:.3f}",
+                "-i",
+                file_path,
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "flac",
+                chunk_path,
+            ]
 
-        proc = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"ffmpeg falló al crear chunks: {proc.stderr.strip() or 'error desconocido'}"
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
             )
+            if proc.returncode != 0:
+                raise RuntimeError(
+                    f"ffmpeg falló al crear chunks: {proc.stderr.strip() or 'error desconocido'}"
+                )
 
-        if os.path.exists(chunk_path) and os.path.getsize(chunk_path) > 0:
-            chunk_paths.append((chunk_path, start))
+            if os.path.exists(chunk_path) and os.path.getsize(chunk_path) > 0:
+                chunk_paths.append((chunk_path, start))
 
-        start += float(step)
-        index += 1
+            start += float(step)
+            index += 1
 
-    if not chunk_paths:
-        raise RuntimeError("No se pudieron generar chunks de audio")
+        if not chunk_paths:
+            raise RuntimeError("No se pudieron generar chunks de audio")
 
-    return chunk_paths, chunk_dir
+        return chunk_paths, chunk_dir
+    except BaseException:
+        shutil.rmtree(chunk_dir, ignore_errors=True)
+        raise
 
 
 async def transcribe(

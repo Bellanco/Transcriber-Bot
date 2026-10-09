@@ -200,8 +200,11 @@ async def handle_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         if not query.message:
             return
 
-        for audio_data in pending_audios:
-            await _process_audio(audio_data, query.message, context)
+        try:
+            for audio_data in pending_audios:
+                await _process_audio(audio_data, query.message, context)
+        finally:
+            await safe_delete(query.message)
         return
 
     await context.application.update_persistence()
@@ -261,6 +264,8 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     if getattr(message, "forward_origin", None):
+        audio_data["message_id"] = message.message_id
+        audio_data["chat_id"] = message.chat_id
         pending_audios = context.user_data.setdefault("pending_forwarded_audios", [])
         pending_audios.append(audio_data)
         if len(pending_audios) == 1:
@@ -455,6 +460,19 @@ async def _process_audio(
             )
 
     finally:
+        source_message_id = audio_data.get("message_id")
+        source_chat_id = audio_data.get("chat_id")
+        if source_message_id is not None and source_chat_id is not None:
+            try:
+                await context.bot.delete_message(
+                    chat_id=source_chat_id,
+                    message_id=source_message_id,
+                )
+            except TelegramError:
+                pass
+        else:
+            await safe_delete(message)
+
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
