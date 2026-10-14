@@ -94,8 +94,6 @@ def _mode_inline_keyboard(
     buttons = []
     for mode in ("transcription", "summary", "both"):
         text = OUTPUT_MODE_BUTTON_TEXT[mode]
-        if mode == current_mode:
-            text = f"{text} (actual)"
         buttons.append(
             InlineKeyboardButton(text, callback_data=f"{callback_prefix}:{mode}")
         )

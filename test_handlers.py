@@ -70,6 +70,15 @@ def make_context() -> SimpleNamespace:
 
 
 class HandleAudioTests(unittest.IsolatedAsyncioTestCase):
+    def test_mode_selector_uses_compact_button_labels(self) -> None:
+        keyboard = handlers._mode_inline_keyboard("transcription")
+        button_texts = [button.text for row in keyboard.inline_keyboard for button in row]
+
+        self.assertEqual(
+            button_texts,
+            ["Transcripción", "Resumen", "Transcripción + resumen"],
+        )
+
     async def test_mode_selection_persists_immediately(self) -> None:
         query = SimpleNamespace(
             data="mode:summary",
