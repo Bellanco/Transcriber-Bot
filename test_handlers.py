@@ -126,6 +126,43 @@ class HandleAudioTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(reply_with_retention.await_args.args[0], message)
         self.assertIs(reply_with_retention.await_args.args[1], context)
 
+    async def test_reuses_recent_forward_selector_for_batch(self) -> None:
+        context = make_context()
+        for _ in range(2):
+            message = FakeIncomingMessage(size=1024, duration=10)
+            message.forward_origin = SimpleNamespace()
+            with patch(
+                "handlers._reply_with_retention",
+                new=AsyncMock(return_value=SimpleNamespace(chat_id=456, message_id=789)),
+            ) as reply_with_retention:
+                await handlers.handle_audio(SimpleNamespace(message=message), context)
+
+        self.assertEqual(len(context.user_data["pending_forwarded_audios"]), 2)
+        reply_with_retention.assert_not_awaited()
+        context.bot.delete_message.assert_not_awaited()
+
+    async def test_replaces_stale_forward_selector_instead_of_queueing_silently(self) -> None:
+        context = make_context()
+        context.user_data["pending_forwarded_audios"] = [{"file_id": "old"}]
+        context.user_data[handlers.FORWARD_SELECTOR_KEY] = {
+            "chat_id": 456,
+            "message_id": 111,
+            "sent_at": 0,
+        }
+        message = FakeIncomingMessage(size=1024, duration=10)
+        message.forward_origin = SimpleNamespace()
+
+        with patch(
+            "handlers._reply_with_retention",
+            new=AsyncMock(return_value=SimpleNamespace(chat_id=456, message_id=222)),
+        ) as reply_with_retention:
+            await handlers.handle_audio(SimpleNamespace(message=message), context)
+
+        reply_with_retention.assert_awaited_once()
+        context.bot.delete_message.assert_awaited_once_with(chat_id=456, message_id=111)
+        self.assertEqual(context.user_data[handlers.FORWARD_SELECTOR_KEY]["message_id"], 222)
+        self.assertEqual(len(context.user_data["pending_forwarded_audios"]), 2)
+
     async def test_selected_forwarded_batch_is_removed_before_processing(self) -> None:
         message = FakeIncomingMessage(size=1024, duration=10)
         query = SimpleNamespace(
@@ -143,6 +180,7 @@ class HandleAudioTests(unittest.IsolatedAsyncioTestCase):
             "audio_type": "Nota de voz",
         }
         context.user_data["pending_forwarded_audios"] = [audio_data]
+        context.user_data[handlers.FORWARD_SELECTOR_KEY] = {"chat_id": 456, "message_id": 789}
 
         with patch("handlers._process_audio", new=AsyncMock()) as process_audio:
             await handlers.handle_mode_callback(
@@ -150,6 +188,7 @@ class HandleAudioTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertNotIn("pending_forwarded_audios", context.user_data)
+        self.assertNotIn(handlers.FORWARD_SELECTOR_KEY, context.user_data)
         context.application.update_persistence.assert_awaited_once()
         process_audio.assert_awaited_once_with(audio_data, message, context)
         self.assertTrue(message.deleted)

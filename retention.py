@@ -134,6 +134,7 @@ async def cleanup_expired_data(application: Any, now: float | None = None) -> No
                 user_data["pending_forwarded_audios"] = active_audios
             else:
                 user_data.pop("pending_forwarded_audios", None)
+                user_data.pop("forward_selector", None)
             changed = True
 
     if changed:

@@ -40,9 +40,10 @@ async def validate_groq_api(api_key: str) -> Tuple[bool, str]:
         status_code = getattr(e, "status_code", None)
         if status_code == 401:
             return False, "GROQ_API_KEY inválida (error 401 Unauthorized)."
-        return False, f"Error al validar Groq API: {str(e)}"
+        # Un fallo transitorio de Groq no debe impedir que el servicio arranque.
+        return True, f"Aviso: no se pudo validar Groq API, se continúa: {str(e)}"
     except Exception as e:
-        return False, f"Error inesperado al validar Groq API: {str(e)}"
+        return True, f"Aviso: error inesperado al validar Groq API, se continúa: {str(e)}"
 
 
 def validate_env_vars() -> Tuple[bool, str]:

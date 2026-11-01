@@ -63,6 +63,27 @@ class RetentionTests(unittest.IsolatedAsyncioTestCase):
         )
         application.update_persistence.assert_awaited_once()
 
+    async def test_cleanup_drops_forward_selector_when_queue_expires(self) -> None:
+        now = 200_000
+        user_data = {
+            "_last_activity_at": now,
+            "pending_forwarded_audios": [
+                {"file_id": "old", "queued_at": now - DATA_RETENTION_SECONDS - 1},
+            ],
+            "forward_selector": {"chat_id": 1, "message_id": 2, "sent_at": 0},
+        }
+        application = SimpleNamespace(
+            bot=SimpleNamespace(delete_message=AsyncMock()),
+            bot_data={},
+            user_data={1: user_data},
+            update_persistence=AsyncMock(),
+        )
+
+        await cleanup_expired_data(application, now=now)
+
+        self.assertNotIn("pending_forwarded_audios", user_data)
+        self.assertNotIn("forward_selector", user_data)
+
     async def test_cleanup_retries_expired_messages_when_telegram_rejects_delete(self) -> None:
         now = 200_000
         expired_message = {"chat_id": 1, "message_id": 2, "expires_at": now - 1}
@@ -143,7 +164,8 @@ class RetentionTests(unittest.IsolatedAsyncioTestCase):
             job_queue=job_queue,
         )
 
-        await _post_init(application)
+        with patch("main._keep_alive_url", return_value=None):
+            await _post_init(application)
 
         job_queue.run_repeating.assert_called_once()
         self.assertEqual(

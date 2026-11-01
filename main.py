@@ -3,7 +3,10 @@
 import logging
 import sys
 from pathlib import Path
+from typing import Optional
+from urllib.parse import urlparse
 
+import httpx
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -24,6 +27,7 @@ from config import (
     TELEGRAM_API_BASE_URL,
     TELEGRAM_API_FILE_URL,
     DATA_RETENTION_SWEEP_SECONDS,
+    KEEP_ALIVE_INTERVAL_SECONDS,
 )
 from retention import cleanup_expired_data
 from utils import (
@@ -49,12 +53,35 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+# httpx registra la URL completa de cada petición, que incluye el token del bot.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 PERSISTENCE_FILE = Path(__file__).with_name("bot_data.pkl")
 
 
 async def _retention_cleanup_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     await cleanup_expired_data(context.application)
+
+
+def _keep_alive_url() -> Optional[str]:
+    """URL pública raíz del servicio, derivada de WEBHOOK_URL."""
+    try:
+        webhook_url, _ = resolve_webhook_settings()
+    except EnvironmentError:
+        return None
+    parsed = urlparse(webhook_url)
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}/"
+
+
+async def _keep_alive_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Pasa por el proxy público de Render, así cuenta como tráfico entrante.
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            await client.get(context.job.data)
+    except httpx.HTTPError as error:
+        logger.warning("Keep-alive fallido: %s", error)
 
 
 async def _post_init(application: Application) -> None:
@@ -67,6 +94,17 @@ async def _post_init(application: Application) -> None:
         first=DATA_RETENTION_SWEEP_SECONDS,
         name="retention-cleanup",
     )
+
+    keep_alive_url = _keep_alive_url()
+    if KEEP_ALIVE_INTERVAL_SECONDS > 0 and keep_alive_url:
+        application.job_queue.run_repeating(
+            _keep_alive_job,
+            interval=KEEP_ALIVE_INTERVAL_SECONDS,
+            first=KEEP_ALIVE_INTERVAL_SECONDS,
+            name="keep-alive",
+            data=keep_alive_url,
+        )
+        logger.info("Keep-alive cada %ds a %s", KEEP_ALIVE_INTERVAL_SECONDS, keep_alive_url)
 
 
 async def validate_startup() -> bool:
@@ -85,7 +123,7 @@ async def validate_startup() -> bool:
     # Validar API de Groq
     logger.info("Validando Groq API...")
     is_valid, msg = await validate_groq_api(GROQ_API_KEY)
-    logger.info(msg)
+    (logger.warning if msg.startswith("Aviso") else logger.info)(msg)
     if not is_valid:
         logger.error("Validación fallida. Abortar.")
         return False

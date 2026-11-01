@@ -66,6 +66,22 @@ OUTPUT_MODE_BUTTON_TEXT = {
     "summary": "Resumen",
     "both": "Transcripción + resumen",
 }
+FORWARD_SELECTOR_KEY = "forward_selector"
+FORWARD_SELECTOR_REFRESH_SECONDS = 60
+
+
+async def _delete_forward_selector(
+    context: ContextTypes.DEFAULT_TYPE, selector: dict[str, object]
+) -> None:
+    chat_id = selector.get("chat_id")
+    message_id = selector.get("message_id")
+    if chat_id is None or message_id is None:
+        return
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except TelegramError:
+        return
+    await untrack_message(context.application, chat_id=chat_id, message_id=message_id)
 
 
 async def _reply_with_retention(
@@ -209,6 +225,7 @@ async def handle_mode_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if callback_prefix == "batch_mode":
         pending_audios = context.user_data.pop("pending_forwarded_audios", [])
+        context.user_data.pop(FORWARD_SELECTOR_KEY, None)
         await context.application.update_persistence()
         await query.answer(f"Modo: {OUTPUT_MODE_LABELS[mode]}")
         if not pending_audios:
@@ -329,14 +346,28 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             audio_data["summary_author"] = sender_name
         pending_audios = context.user_data.setdefault("pending_forwarded_audios", [])
         pending_audios.append(audio_data)
-        if len(pending_audios) == 1:
-            current_mode = _output_mode(context)
-            await _reply_with_retention(
-                message,
-                context,
-                "Elige el resultado para los audios reenviados:",
-                reply_markup=_mode_inline_keyboard(current_mode, "batch_mode"),
-            )
+        # Reenvíos en lote llegan casi a la vez y comparten selector; si el selector
+        # es antiguo (ignorado o borrado), se sustituye para no encolar en silencio.
+        selector = context.user_data.get(FORWARD_SELECTOR_KEY)
+        if selector and time.time() - selector.get("sent_at", 0) < FORWARD_SELECTOR_REFRESH_SECONDS:
+            await context.application.update_persistence()
+            return
+
+        if selector:
+            await _delete_forward_selector(context, selector)
+        current_mode = _output_mode(context)
+        selector_message = await _reply_with_retention(
+            message,
+            context,
+            "Elige el resultado para los audios reenviados:",
+            reply_markup=_mode_inline_keyboard(current_mode, "batch_mode"),
+        )
+        context.user_data[FORWARD_SELECTOR_KEY] = {
+            "chat_id": getattr(selector_message, "chat_id", None),
+            "message_id": getattr(selector_message, "message_id", None),
+            "sent_at": time.time(),
+        }
+        await context.application.update_persistence()
         return
 
     await _process_audio(audio_data, message, context)

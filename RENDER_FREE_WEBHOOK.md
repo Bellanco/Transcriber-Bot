@@ -74,12 +74,31 @@ Debe mostrar:
 
 ## 7) Limitaciones esperadas en Free
 
-- Puede haber cold start tras inactividad.
-- El primer mensaje despues de dormir puede tardar.
+- El servicio se apaga tras 15 min sin tráfico HTTP entrante (las tareas internas,
+  como `retention-cleanup`, no cuentan). En los logs se ve como
+  `Application is stopping`.
+- El primer mensaje despues de dormir puede tardar (cold start). Si tarda demasiado,
+  Telegram registra `Read timeout expired` en `getWebhookInfo` y reintenta la entrega.
+- Para mantenerlo despierto:
+  - El bot hace un keep-alive interno: cada `KEEP_ALIVE_INTERVAL_SECONDS` (600 por
+    defecto, `0` lo desactiva) visita la raiz de su URL publica, derivada de `WEBHOOK_URL`.
+  - Si aun asi se duerme o se reinicia, un monitor externo (UptimeRobot, cron-job.org)
+    a `https://tu-servicio.onrender.com/` lo despierta y avisa por email si no responde
+    (un 404 tambien cuenta como trafico).
+  Las 750 h/mes del plan Free bastan para un servicio 24/7.
+- Si Groq falla de forma transitoria al arrancar, el bot arranca igualmente (solo
+  aborta si falta la clave o es invalida).
+- El disco es efimero: `bot_data.pkl` (preferencias y mensajes pendientes de borrar)
+  se pierde en cada deploy o reinicio.
 - Hay limites mensuales del plan Free (horas/uso).
 
 ## 8) Troubleshooting rapido
 
+- El bot no responde y no hay logs en Render:
+  - consulta `getWebhookInfo`: si `pending_update_count` > 0 y `last_error_message`
+    es `Read timeout expired`, Render no esta levantando la instancia.
+  - haz `Manual Deploy > Deploy latest commit` (o `Restart`) y revisa el estado de
+    horas Free en Billing.
 - Error de variables faltantes:
   - revisa `TELEGRAM_TOKEN`, `GROQ_API_KEY`, `WEBHOOK_URL`.
 - Webhook no llega:

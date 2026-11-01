@@ -38,6 +38,8 @@ MAX_SUMMARY_INPUT = 12000  # Caracteres máximos para resumir
 PROCESSING_CONCURRENCY = 2  # Audios simultáneos permitidos
 DATA_RETENTION_SECONDS = 24 * 60 * 60
 DATA_RETENTION_SWEEP_SECONDS = 60
+# Render Free duerme el servicio tras 15 min sin tráfico entrante; 0 lo desactiva.
+KEEP_ALIVE_INTERVAL_SECONDS = int(os.environ.get("KEEP_ALIVE_INTERVAL_SECONDS", "600"))
 
 # ── Audio largo: chunking ─────────────────────────────────────────────────────
 
