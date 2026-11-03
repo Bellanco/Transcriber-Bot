@@ -12,7 +12,7 @@ La aplicación está organizada en módulos Python siguiendo patrones estándar:
 | **`utils.py`** | Validación (API/archivos), helpers de Telegram, formateo |
 | **`formatter.py`** | Formateo de transcripciones, párrafos, resúmenes |
 | **`transcriber.py`** | Lógica de transcripción con Groq Whisper + manejo de audios largos |
-| **`summarizer.py`** | Generación de resúmenes con Groq llama |
+| **`summarizer.py`** | Resumen por temas de la fuente completa con Groq y modelo configurable |
 | **`handlers.py`** | Handlers de comandos y procesamiento de audios |
 | **`main.py`** | Punto de entrada: validación al startup + configuración webhook |
 
@@ -33,9 +33,33 @@ main.py
       │   │   └── formatter.py helpers
       │   └── utils.py (safe_edit)
       ├── summarizer.py (summarize)
-      │   └── config.py
+      │   ├── config.py
+      │   └── formatter.py (split_text, JSON y temas)
       └── formatter.py (stream_text)
 ```
+
+---
+
+## Resumen de transcripciones completas
+
+- `MAX_SUMMARY_INPUT = 12000` limita cada bloque de entrada, no la transcripción
+  completa. `split_text` conserva el contenido y prioriza fronteras naturales.
+- `summarize` procesa bloques secuencialmente y concatena puntos en orden.
+  `posicion_inicial` ordena temas dentro de cada bloque; no se comparan posiciones
+  locales entre bloques ni se hace una fusión semántica posterior.
+- El presupuesto por petición es `min(4096, max(1024, ceil(caracteres / 3) + 512))`
+  tokens de salida. Es una heurística de presupuesto, no un conteo real de tokens
+  ni una evaluación de calidad. El prompt adapta detalle y temas a la fuente.
+- No se recortan los puntos a 32 palabras. `handlers.py` divide la entrega por
+  el límite Telegram y conserva el seguimiento de mensajes para retención.
+- Cada bloque tiene `SUMMARY_MAX_RETRIES` intentos, timeout por llamada y backoff.
+  Se desactivan los reintentos internos del SDK de resumen para evitar duplicar
+  esta política. El timeout global contempla todos los bloques.
+- Las respuestas JSON inválidas o truncadas se reintentan; si un bloque falla,
+  no se devuelve un resumen parcial. Texto plano no JSON conserva el fallback
+  existente con logging visible.
+- Tests: `python -m unittest test_summarizer test_formatter test_handlers`,
+  exclusivamente con fixtures y mocks; no prueban fidelidad de un modelo real.
 
 ---
 

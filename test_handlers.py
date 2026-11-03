@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import handlers
-from config import LONG_AUDIO_THRESHOLD_SECONDS, MAX_FILE_SIZE_BYTES
+from config import LONG_AUDIO_THRESHOLD_SECONDS, MAX_FILE_SIZE_BYTES, MAX_TELEGRAM_LENGTH
 
 
 class FakeStatusMessage:
@@ -259,6 +259,51 @@ class HandleAudioTests(unittest.IsolatedAsyncioTestCase):
                 await handlers._process_audio(audio_data, message, context)
 
         self.assertTrue(any(text.startswith("Resumen de Lucía Martín:") for text in message.texts))
+
+    def test_summary_timeout_scales_with_actual_chunk_count(self) -> None:
+        source = "Un asunto. " * 3000
+        chunk_count = len(handlers._summary_chunks(source))
+        self.assertGreater(chunk_count, 1)
+        self.assertEqual(
+            handlers._estimate_summary_timeout(source),
+            chunk_count * handlers._estimate_summary_timeout("Breve"),
+        )
+
+    async def test_long_summary_is_sent_in_parts_with_retention(self) -> None:
+        message = FakeIncomingMessage(size=1024, duration=10)
+        context = make_context()
+        context.user_data["output_mode"] = "summary"
+        summary = "\n\n".join(
+            f"• Tema {index}: " + "detalle " * 40 for index in range(40)
+        )
+        with patch("handlers.transcribe", new=AsyncMock(return_value=("texto", "texto"))):
+            with patch("handlers.summarize", new=AsyncMock(return_value=summary)):
+                with patch(
+                    "handlers.reply_with_retention",
+                    wraps=handlers.reply_with_retention,
+                ) as reply:
+                    await handlers.handle_audio(SimpleNamespace(message=message), context)
+
+        expected = handlers.split_text(f"Resumen:\n\n{summary}")
+        sent = [
+            text for text in message.texts
+            if text != "Preparando resumen..." and not text.startswith("Procesando")
+        ]
+        self.assertEqual(sent, expected)
+        self.assertTrue(all(len(text) <= MAX_TELEGRAM_LENGTH for text in sent))
+        self.assertGreater(len(sent), 1)
+        # El primer bloque edita el mensaje de estado, ya registrado para retencion.
+        self.assertEqual(reply.await_count, len(expected) + 1)
+
+    async def test_summary_failure_remains_visible(self) -> None:
+        message = FakeIncomingMessage(size=1024, duration=10)
+        context = make_context()
+        context.user_data["output_mode"] = "summary"
+        with patch("handlers.transcribe", new=AsyncMock(return_value=("texto", "texto"))):
+            with patch("handlers.summarize", new=AsyncMock(side_effect=ValueError("JSON inválido"))):
+                with self.assertLogs("handlers", level="ERROR"):
+                    await handlers.handle_audio(SimpleNamespace(message=message), context)
+        self.assertTrue(any("No se pudo generar el resumen" in text for text in message.texts))
 
     def test_forwarded_sender_name_supports_hidden_users_and_chats(self) -> None:
         hidden_origin = SimpleNamespace(sender_user_name="Nombre oculto")

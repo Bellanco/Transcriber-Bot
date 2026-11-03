@@ -277,14 +277,6 @@ def split_text(text: str, limit: int = MAX_TELEGRAM_LENGTH) -> List[str]:
     return [p for p in parts if p]
 
 
-def _truncate_words(text: str, max_words: int = 32) -> str:
-    """Recorta una frase a un máximo de palabras para mantenerla escaneable."""
-    words = text.split()
-    if len(words) <= max_words:
-        return text.strip()
-    return " ".join(words[:max_words]).strip(" ,;:") + "..."
-
-
 def _extract_json_payload(raw_text: str) -> Optional[str]:
     """Extrae un bloque JSON desde texto libre o dentro de ```json ... ```."""
     if not raw_text:
@@ -327,7 +319,7 @@ def _format_summary_from_topics(topics: List[Dict[str, Any]]) -> str:
         except (TypeError, ValueError):
             order_value = float("inf")
 
-        normalized.append((order_value, idx, topic, _truncate_words(summary)))
+        normalized.append((order_value, idx, topic, summary))
 
     if not normalized:
         return ""
@@ -363,10 +355,9 @@ def format_summary(text: str) -> str:
             summary = summary.strip(" .,-")
             if not summary:
                 continue
-            summary = _truncate_words(summary)
             bullets.append(f"• {topic}: {summary}")
         else:
-            summary = _truncate_words(line.strip(" .,-"))
+            summary = line.strip(" .,-")
             if summary:
                 bullets.append(f"• Tema: {summary}")
 
@@ -376,4 +367,4 @@ def format_summary(text: str) -> str:
     compact = re.sub(r"\s+", " ", text).strip()
     if not compact:
         return "• Tema general: No se detectaron ideas suficientes para resumir."
-    return f"• Tema general: {_truncate_words(compact)}"
+    return f"• Tema general: {compact}"

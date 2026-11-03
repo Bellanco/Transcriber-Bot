@@ -32,7 +32,7 @@ Bot de Telegram que:
 | Característica | Detalles |
 |---|---|
 | **Transcripción** | Whisper-large-v3 (Groq) |
-| **Resúmenes** | llama-3.3-70b (Groq) |
+| **Resúmenes** | Groq, modelo configurable con `SUMMARY_MODEL` |
 | **Idioma** | Español (configurable) |
 | **Audios largos** | Automático chunking con ffmpeg |
 | **Validaciones** | API al startup + archivo descargado |
@@ -56,6 +56,37 @@ main.py            ← Punto de entrada
 ```
 
 Ver [ARCHITECTURE.md](ARCHITECTURE.md) para detalles completos.
+
+---
+
+## Resúmenes y audios largos
+
+El resumen adapta el número de puntos y su detalle a la información y los temas
+de la transcripción, no solo a los minutos de audio. Los puntos pueden tener
+varias frases; el formateador no elimina palabras al superar una longitud fija.
+
+Se procesa toda la transcripción en bloques de hasta 12.000 caracteres,
+respetando párrafos y palabras cuando es posible. Cada bloque dispone de
+1.024 a 4.096 tokens de salida según su tamaño. Los resultados se concatenan
+en orden, sin una segunda compresión que pueda eliminar temas finales.
+Un asunto que continúa en otro bloque puede aparecer en varios puntos; no se
+fusionan automáticamente asuntos con títulos parecidos.
+
+Un texto breve requiere una petición; las transcripciones largas requieren una
+por bloque, ejecutadas secuencialmente, más posibles reintentos. Esto aumenta
+coste y tiempo según la longitud. El timeout se ajusta al número real de bloques.
+Los resúmenes que exceden un mensaje se dividen para Telegram manteniendo la
+retención habitual.
+
+Las respuestas vacías, JSON incompleto/inválido o salidas cortadas por el límite
+de tokens se reintentan de forma acotada y, si persiste el fallo, se informa del
+error en lugar de mostrar un resumen parcial como completo. El fallback de
+texto plano existente se conserva con aviso en logs.
+
+Estas garantías de procesamiento se prueban con
+`python -m unittest test_summarizer test_formatter test_handlers` y mocks.
+No sustituyen una evaluación de fidelidad y cobertura con respuestas reales
+del modelo, que requiere autorización y material no privado.
 
 ---
 
@@ -262,6 +293,58 @@ python -c "import asyncio; from utils import validate_groq_api; ..."
 | **PRODUCTION_CHECKLIST.md** | Verificación exhaustiva antes de publicar |
 | **DEPLOY_RENDER.md** | Guía paso a paso para Render |
 | **RENDER_FREE_WEBHOOK.md** | Información general de webhook |
+
+---
+
+## Agentes de desarrollo en VS Code
+
+El proyecto incluye seis [agentes personalizados](.github/agents) y una
+[base de instrucciones compartida](.github/copilot-instructions.md).
+
+| Agente | Responsabilidad |
+|---|---|
+| [coordinador](.github/agents/coordinador.agent.md) | Delimitar tareas, delegar cuando aporte valor e integrar cambios compartidos. |
+| [telegram](.github/agents/telegram.agent.md) | Comandos, modos, callbacks, mensajes, preferencias y retención. |
+| [transcripcion](.github/agents/transcripcion.agent.md) | Whisper, ffmpeg, fragmentación, solapamiento y segmentos. |
+| [resumen-ia](.github/agents/resumen-ia.agent.md) | Exclusivamente desarrollo de prompts, límites, JSON por temas y pruebas del resumen IA. |
+| [infraestructura](.github/agents/infraestructura.agent.md) | Configuración, arranque, webhook, Bot API local y documentación de Render. |
+| [qa](.github/agents/qa.agent.md) | Revisar cambios y ejecutar pruebas, sin herramientas de edición. |
+
+Abre este repositorio en VS Code con Copilot y selecciona `coordinador` en el
+selector de agentes del chat. También puedes elegir directamente un especialista
+para una tarea acotada. Por ejemplo:
+
+> Revisa el manejo de respuestas JSON malformadas en el resumen IA. Coordina
+> una corrección con resumen-ia, conserva los modos de Telegram y valida con
+> mocks y las pruebas afectadas.
+
+El coordinador evita delegaciones pequeñas y cambios paralelos en el mismo
+archivo. Los especialistas no crean subagentes. Todos heredan el modelo
+seleccionado en VS Code; ese modelo es independiente de `SUMMARY_MODEL` del bot.
+No se autorizan automáticamente despliegues, commits, acceso a secretos ni
+llamadas a servicios reales.
+
+Para comprobar la configuración en tu instalación, verifica que aparezcan los
+seis nombres en el selector y solicita al coordinador una tarea de lectura
+acotada que invoque `resumen-ia`. Si no aparecen, recarga la ventana y revisa
+la compatibilidad y habilitación de agentes personalizados en tu versión de
+Copilot. La validación de archivos no sustituye esta comprobación del host.
+QA no tiene herramientas de edición, pero sí terminal para pruebas: su
+prohibición de modificar fuentes es una instrucción, no un aislamiento técnico.
+
+Las pruebas existentes usan `unittest` y mocks, sin necesitar Telegram o Groq
+reales:
+
+```powershell
+python -m unittest test_formatter test_handlers
+python -m unittest discover
+git diff --check
+```
+
+Las pruebas de formato no evalúan por sí solas la calidad de los prompts ni las
+respuestas reales del proveedor. Estos agentes ayudan a desarrollar el proyecto:
+**no se ejecutan dentro del bot ni modifican sus funcionalidades en producción**.
+Los agentes runtime requieren un diseño y aprobación separados.
 
 ---
 

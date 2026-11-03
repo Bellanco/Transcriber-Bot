@@ -49,8 +49,8 @@ from transcriber import (
     transcribe_long_audio,
     _ffmpeg_is_available,
 )
-from summarizer import summarize
-from formatter import stream_text
+from summarizer import summarize, _summary_chunks
+from formatter import stream_text, split_text
 
 logger = logging.getLogger(__name__)
 
@@ -148,11 +148,12 @@ def _estimate_transcription_timeout(duration_seconds: int) -> float:
     return max(float(PROCESSING_TIMEOUT_SECONDS), estimated)
 
 
-def _estimate_summary_timeout() -> float:
+def _estimate_summary_timeout(text: str = "") -> float:
     """Timeout máximo esperable del resumen con su propio retry policy."""
     retries_budget = float(SUMMARY_TIMEOUT_SECONDS) * float(SUMMARY_MAX_RETRIES)
     backoff_budget = _retry_backoff_total(SUMMARY_MAX_RETRIES)
-    return retries_budget + backoff_budget + 10.0
+    chunk_count = max(1, len(_summary_chunks(text)))
+    return chunk_count * (retries_budget + backoff_budget + 10.0)
 
 
 # ── Comandos ──────────────────────────────────────────────────────────────────
@@ -503,7 +504,7 @@ async def _process_audio(
                 )
 
                 try:
-                    summary_timeout = _estimate_summary_timeout()
+                    summary_timeout = _estimate_summary_timeout(formatted)
                     summary = await asyncio.wait_for(
                         summarize(formatted),
                         timeout=summary_timeout,
@@ -512,9 +513,10 @@ async def _process_audio(
                     summary_title = (
                         f"Resumen de {summary_author}" if summary_author else "Resumen"
                     )
-                    await summary_status.edit_text(
-                        f"{summary_title}:\n\n{summary}"
-                    )
+                    summary_parts = split_text(f"{summary_title}:\n\n{summary}")
+                    await summary_status.edit_text(summary_parts[0])
+                    for part in summary_parts[1:]:
+                        await _reply_with_retention(last_msg, context, part)
                 except asyncio.TimeoutError:
                     logger.error("Timeout al generar resumen")
                     if await safe_delete(summary_status):
